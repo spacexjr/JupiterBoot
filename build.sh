@@ -20,6 +20,12 @@ UNPACK="$BUILD/unpack"
 STAGE="$BUILD/stage"
 VERIFY="$BUILD/verify"
 IMG_IN="${1:-$here/boot.img}"
+# magiskboot runs from inside the staging dirs, so a relative IMG_IN would
+# resolve against them. Anchor it to this script's directory.
+case "$IMG_IN" in
+  /*) ;;
+  *) IMG_IN="$here/$IMG_IN" ;;
+esac
 IMG_OUT="$BUILD/boot-jbm.img"
 
 JBM_VERSION="${JBM_VERSION:-1.0}"
