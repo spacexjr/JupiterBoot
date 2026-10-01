@@ -1,0 +1,28 @@
+# Build output
+/out/
+*.o
+*.ppm
+
+# Extracted / derived working copies (regenerate from boot.img)
+/rd/
+/ksrc/
+/system_mnt/
+/kernel
+/kernel.bak
+/dtb
+/ramdisk.cpio
+/builtin_initramfs.gz
+/init_dedentrodosystem
+/init.environ.rc_system
+
+# Large vendor blobs / scratch files
+/system.img
+/blob.out
+/blob.xz
+/bir.cpio
+/bir/
+
+# Editors / OS
+*~
+*.swp
+.DS_Store
