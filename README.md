@@ -106,12 +106,8 @@ build.sh         build + inject + verify, never flashes
 out/             build artifacts (jbm_init, boot-jbm.img, previews, staging)
 ```
 
-## Known limitations
+## Untested
+- Magisk 
 
-- **Download/ODIN**: there is no known userspace trigger for MTK download mode;
-  the menu only passes the `download` reason through `reboot` and logs it.
-- **AVB**: the image is built for an unlocked device (`verifiedbootstate=orange`,
-  `avb_version=0`). It does not update `vbmeta`; do not flash it on a locked
-  device.
-- The actual Android boot through `/init.system` after the menu chains to it has
-  not been validated on hardware from this repository.
+---
+Thank you
