@@ -1,4 +1,4 @@
-# jupiter-boot-menu
+# JupiterBoot
 
 A graphical, touch-driven boot menu injected into the `boot` ramdisk of a
 Samsung Galaxy A22 4G (`a22` / SM-A225M, MediaTek MT6768, Android 15 GSI).
