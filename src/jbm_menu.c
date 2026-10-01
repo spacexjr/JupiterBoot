@@ -38,6 +38,9 @@ struct jbm_timespec {
 /* Duration of the entry slide-in animation, in ms. */
 #define JBM_INTRO_MS 480
 
+/* errno of the last failed jbm_mmap(), 0 otherwise (diagnostics only). */
+static int jbm_mmap_err = 0;
+
 #define LINUX_REBOOT_MAGIC1 0xfee1dead
 #define LINUX_REBOOT_MAGIC2 0x28121969
 #define LINUX_REBOOT_CMD_RESTART 0x01234567
@@ -181,7 +184,15 @@ static i64 hs_reboot_cmd(int cmd, int sub) {
 #define BTN_TOUCH 0x14A
 
 #define FBIOGET_VSCREENINFO 0x4600
+#define FBIOPUT_VSCREENINFO 0x4601
+#define FBIOBLANK 0x4611
+#define FB_ACTIVATE_FORCE 64
+#define FB_ACTIVATE_ALL 32
 #define FBIOGET_FSCREENINFO 0x4602
+
+#ifndef S_IFCHR
+#define S_IFCHR 0020000
+#endif
 
 #define _IOC(dir, type, nr, size) (((dir) << 30) | ((size) << 16) | ((type) << 8) | (nr))
 #define _IOC_READ 2
@@ -218,7 +229,11 @@ static void *jbm_mmap_raw(u32 len, int prot, int flags, int fd, long off) {
 static void *jbm_mmap(u32 len, int prot, int flags, int fd, long off) {
     void *p = jbm_mmap_raw(len, prot, flags, fd, off);
     long e = (long)p;
-    if (e < 0 && e > -4096) return 0; /* kernel returned -errno */
+    jbm_mmap_err = 0;
+    if (e < 0 && e > -4096) {
+        jbm_mmap_err = (int)-e; /* kernel returned -errno */
+        return 0;
+    }
     return p;
 }
 static i64 jbm_getdents(int fd, void *b, u32 n) { return sc3(SYS_getdents64, fd, (long)b, n); }
@@ -483,6 +498,9 @@ static int jbm_vfmt(char *out, const char *fmt, va_list ap) {
             case 'i':
                 o = jbm_fmtd(o, va_arg(ap, i64), pad, padc);
                 break;
+            case 'u':
+                o = jbm_fmtd(o, (i64)va_arg(ap, unsigned int), pad, padc);
+                break;
             case 's': {
                 const char *s = va_arg(ap, const char *);
                 if (!s) s = "(null)";
@@ -513,25 +531,42 @@ static int jbm_sn(char *out, const char *fmt, ...) {
 }
 
 static int jbm_klog_fd = -1;
+static int jbm_kmsg_err = 0;
+static int jbm_con_err = 0;
 
 static void jbm_log(const char *fmt, ...) {
     char b[512];
-    char l[544];
+    char l[600];
     va_list ap;
     va_start(ap, fmt);
     jbm_vfmt(b, fmt, ap);
     va_end(ap);
-    int n = 0;
     if (jbm_klog_fd < 0) {
-        jbm_klog_fd = jbm_open("/dev/console", O_WRONLY, 0);
-        if (jbm_klog_fd < 0) jbm_klog_fd = jbm_open("/dev/kmsg", O_WRONLY, 0);
+        /* Prefer /dev/kmsg: those lines land in the kernel log, so they show
+         * up in dmesg and survive in pstore console-ramoops after reboot.
+         * /dev/console alone is a VT write and is lost. */
+        jbm_klog_fd = jbm_open("/dev/kmsg", O_WRONLY, 0);
+        if (jbm_klog_fd >= 0) {
+            jbm_kmsg_err = 0;
+        } else {
+            jbm_kmsg_err = -jbm_klog_fd;
+            jbm_klog_fd = jbm_open("/dev/console", O_WRONLY, 0);
+            jbm_con_err = jbm_klog_fd < 0 ? -jbm_klog_fd : 0;
+        }
     }
+    int n = 0;
     l[n++] = '<';
     l[n++] = '6';
     l[n++] = '>';
-    for (int i = 0; b[i] && n < (int)sizeof(l) - 2; i++) l[n++] = b[i];
+    for (int i = 0; b[i] && n < (int)sizeof(l) - 40; i++) l[n++] = b[i];
+    if (jbm_klog_fd < 0 && jbm_kmsg_err) {
+        n += jbm_sn(l + n, " [kmsg_err=%d con_err=%d]", jbm_kmsg_err, jbm_con_err);
+    }
     l[n++] = '\n';
-    if (jbm_klog_fd >= 0) jbm_write(jbm_klog_fd, l, (u32)n);
+    if (jbm_klog_fd >= 0)
+        jbm_write(jbm_klog_fd, l, (u32)n);
+    else
+        jbm_write(1, l, (u32)n); /* stdout only when kmsg is unavailable */
 }
 
 #ifndef JBM_HOST
@@ -615,22 +650,34 @@ static int chan_ok(u32 off, u32 len, u32 bpp) {
     return 1;
 }
 
+/* errno (positive) of the last gfx_open() failure, 0 if the failure was a
+ * validation reject rather than a syscall error. */
+static int gfx_err = 0;
+/* Suppress per-attempt failure lines while the caller is polling gfx_open(). */
+static int gfx_quiet = 0;
+
 static int gfx_open(void) {
     static char nodes[4][40];
     int fd = -1;
+    gfx_err = 0;
     for (int i = 0; i < 4; i++) {
         jbm_sn(nodes[i], "/dev/fb%d", i);
         fd = jbm_open(nodes[i], O_RDWR, 0);
         if (fd >= 0) break;
+        if (fd < 0 && -fd > gfx_err) gfx_err = -fd;
     }
     if (fd < 0) {
         jbm_mkdir("/dev", 0755);
         jbm_mkdir("/dev/graphics", 0755);
-        jbm_mknod("/dev/graphics/fb0", 0600, (29 << 8) | 0);
+        i64 mk = jbm_mknod("/dev/graphics/fb0", 0600 | S_IFCHR, (29 << 8) | 0);
         fd = jbm_open("/dev/graphics/fb0", O_RDWR, 0);
+        if (fd < 0) {
+            gfx_err = -fd;
+            if (mk < 0) jbm_log("jbm: mknod /dev/graphics/fb0 failed (%d)", (int)-mk);
+        }
     }
     if (fd < 0) {
-        jbm_log("jbm: no framebuffer node");
+        if (!gfx_quiet) jbm_log("jbm: no framebuffer node (err %d)", gfx_err);
         return -1;
     }
 
@@ -639,9 +686,12 @@ static int gfx_open(void) {
     memset(&var, 0, sizeof(var));
     memset(&fix, 0, sizeof(fix));
 
-    if (jbm_ioctl(fd, FBIOGET_VSCREENINFO, &var) != 0 || var.xres < 16 || var.xres > 8192 ||
-        var.yres < 16 || var.yres > 8192) {
-        jbm_log("jbm: FBIOGET_VSCREENINFO unusable");
+    i64 vr = jbm_ioctl(fd, FBIOGET_VSCREENINFO, &var);
+    if (vr != 0 || var.xres < 16 || var.xres > 8192 || var.yres < 16 || var.yres > 8192) {
+        gfx_err = vr < 0 ? (int)-vr : 0;
+        if (!gfx_quiet)
+            jbm_log("jbm: FBIOGET_VSCREENINFO unusable (err %d xres=%u yres=%u bpp=%u)", gfx_err, var.xres,
+                    var.yres, var.bits_per_pixel);
         jbm_close(fd);
         return -1;
     }
@@ -672,7 +722,8 @@ static int gfx_open(void) {
 
     u8 *mem = (u8 *)jbm_mmap(len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (!mem) {
-        jbm_log("jbm: fb mmap failed");
+        gfx_err = jbm_mmap_err;
+        if (!gfx_quiet) jbm_log("jbm: fb mmap failed (err %d len=%u)", gfx_err, len);
         jbm_close(fd);
         return -1;
     }
@@ -703,6 +754,24 @@ static int gfx_open(void) {
     jbm_log("jbm: fb %ux%u bpp=%u stride=%u len=%u rgb=%u:%u/%u:%u/%u:%u a=%u:%u", G.w, G.h, G.bpp, stride, len,
             G.rl, G.ro, G.gl, G.go, G.bl, G.bo, G.tl, G.to);
     return 0;
+}
+
+/* mtkfb keeps scanning whatever LK left programmed in its layer: writing the
+ * framebuffer is not enough, the driver has to re-apply the mode for the layer
+ * to pick up the new contents. Verified on this device: FBIOPUT_VSCREENINFO with
+ * FB_ACTIVATE_FORCE is what makes fb0 visible (without it the boot logo stays
+ * frozen on screen while the menu draws into memory nobody reads). */
+static void gfx_kick(void) {
+    if (!G.ok) return;
+    struct jbm_fb_var var;
+    memset(&var, 0, sizeof(var));
+    i64 g = jbm_ioctl(G.fd, FBIOGET_VSCREENINFO, &var);
+    var.activate = FB_ACTIVATE_FORCE | FB_ACTIVATE_ALL;
+    i64 p = jbm_ioctl(G.fd, FBIOPUT_VSCREENINFO, &var);
+    i64 b1 = jbm_ioctl(G.fd, FBIOBLANK, (void *)1);
+    jbm_sleep_ms(250);
+    i64 b0 = jbm_ioctl(G.fd, FBIOBLANK, (void *)0);
+    jbm_log("jbm: gfx kick get=%d put=%d blank1=%d blank0=%d", (int)g, (int)p, (int)b1, (int)b0);
 }
 
 static u32 mix(u32 c1, u32 c2, u32 t) {
@@ -1046,11 +1115,12 @@ static int touch_open(void) {
         return 0;
     }
 
-    int fallback_fd = -1;
-    int fallback_mt = 0;
-    char fallback_nm[64];
-    struct jbm_absinfo fax, fay;
-    memset(fallback_nm, 0, sizeof(fallback_nm));
+    int best_fd = -1;
+    int best_score = -1;
+    int best_mt = 0;
+    char best_nm[64];
+    struct jbm_absinfo bax, bay;
+    memset(best_nm, 0, sizeof(best_nm));
 
     for (int i = 0; i < count; i++) {
         if (!jbm_str_has(ents[i], "event")) continue;
@@ -1069,7 +1139,7 @@ static int touch_open(void) {
         jbm_mkdir("/dev", 0755);
         jbm_mkdir("/dev/input", 0755);
         jbm_sn(node, "/dev/input/%s", ents[i]);
-        jbm_mknod(node, 0600, (maj << 8) | min);
+        jbm_mknod(node, 0600 | S_IFCHR, (maj << 8) | min);
 #endif
 
         int fd = jbm_open(node, O_RDONLY | O_NONBLOCK, 0);
@@ -1078,7 +1148,7 @@ static int touch_open(void) {
         char nm[64];
         memset(nm, 0, sizeof(nm));
         struct jbm_absinfo ax, ay;
-        int hx = jbm_ioctl(fd, EVIOCGNAME(sizeof(nm)), nm) >= 0;
+        jbm_ioctl(fd, EVIOCGNAME(sizeof(nm)), nm);
         int mt = 1;
         int okx = jbm_ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &ax) == 0;
         int oky = jbm_ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &ay) == 0;
@@ -1094,47 +1164,47 @@ static int touch_open(void) {
             continue;
         }
 
-        /* Prefer a device whose name mentions "touch"; keep the first usable
-         * event node as a fallback in case none is named like a touchscreen. */
-        if (jbm_str_has(nm, "touch")) {
-            T.fd = fd;
-            T.mt = mt;
-            T.ranged = 1;
-            T.x0 = ax.minimum;
-            T.x1 = ax.maximum;
-            T.y0 = ay.minimum;
-            T.y1 = ay.maximum;
-            T.sx = (int)G.w / 2;
-            T.sy = (int)G.h / 2;
-            jbm_log("jbm: touch=%s x[%d..%d] y[%d..%d] %s", hx ? nm : "(noname)", T.x0, T.x1, T.y0,
-                    T.y1, T.mt ? "mt" : "abs");
-            if (fallback_fd >= 0) jbm_close(fallback_fd);
-            return 1;
+        /* A collapsed axis range cannot be mapped to screen coordinates, so
+         * devices like sec_touchproximity (0..0) are never usable. */
+        if ((i64)ax.maximum - (i64)ax.minimum <= 0 || (i64)ay.maximum - (i64)ay.minimum <= 0) {
+            jbm_close(fd);
+            continue;
         }
-        if (fallback_fd < 0) {
-            fallback_fd = fd;
-            fallback_mt = mt;
-            memcpy(fallback_nm, nm, sizeof(fallback_nm));
-            fax = ax;
-            fay = ay;
+
+        /* Score every candidate instead of taking the first "touch" match:
+         * getdents order is arbitrary and would otherwise pick e.g. the
+         * proximity sensor over the real touchscreen. */
+        int score = 1;
+        if (jbm_str_has(nm, "touchscreen")) score += 100;
+        else if (jbm_str_has(nm, "touch")) score += 40;
+        if (jbm_str_has(nm, "proximity")) score -= 60;
+        if (mt) score += 10;
+
+        if (score > best_score) {
+            if (best_fd >= 0) jbm_close(best_fd);
+            best_fd = fd;
+            best_score = score;
+            best_mt = mt;
+            memcpy(best_nm, nm, sizeof(best_nm));
+            bax = ax;
+            bay = ay;
         } else {
             jbm_close(fd);
         }
     }
 
-    if (fallback_fd >= 0) {
-        T.fd = fallback_fd;
-        T.mt = fallback_mt;
+    if (best_fd >= 0) {
+        T.fd = best_fd;
+        T.mt = best_mt;
         T.ranged = 1;
-        T.x0 = fax.minimum;
-        T.x1 = fax.maximum;
-        T.y0 = fay.minimum;
-        T.y1 = fay.maximum;
+        T.x0 = bax.minimum;
+        T.x1 = bax.maximum;
+        T.y0 = bay.minimum;
+        T.y1 = bay.maximum;
         T.sx = (int)G.w / 2;
         T.sy = (int)G.h / 2;
-        jbm_log("jbm: touch=%s x[%d..%d] y[%d..%d] %s (fallback: no named touchscreen)",
-                fallback_nm[0] ? fallback_nm : "(noname)", T.x0, T.x1, T.y0, T.y1,
-                T.mt ? "mt" : "abs");
+        jbm_log("jbm: touch=%s x[%d..%d] y[%d..%d] %s score=%d", best_nm[0] ? best_nm : "(noname)",
+                T.x0, T.x1, T.y0, T.y1, T.mt ? "mt" : "abs", best_score);
         return 1;
     }
     jbm_log("jbm: no usable touchscreen (event nodes with ABS axes)");
@@ -1611,16 +1681,21 @@ int jbm_main(int argc, char **argv, char **envp);
 /* Sets up just enough of /dev to log, read input and use the framebuffer. */
 static void dev_init(void) {
 #ifndef JBM_HOST
+    jbm_log("jbm: dev_init begin");
     jbm_mkdir("/dev", 0755);
-    if (jbm_mount("tmpfs", "/dev", "tmpfs", 0, NULL) != 0)
-        jbm_log("jbm: tmpfs on /dev failed, reusing ramdisk /dev");
-    jbm_mknod("/dev/console", 0600, (5 << 8) | 1);
-    jbm_mknod("/dev/kmsg", 0600, (1 << 8) | 11);
-    jbm_mknod("/dev/null", 0666, (1 << 8) | 3);
+    i64 r = jbm_mount("tmpfs", "/dev", "tmpfs", 0, NULL);
+    if (r != 0) jbm_log("jbm: tmpfs on /dev failed (%d), reusing ramdisk /dev", (int)r);
+    i64 c = jbm_mknod("/dev/console", 0600 | S_IFCHR, (5 << 8) | 1);
+    i64 k = jbm_mknod("/dev/kmsg", 0600 | S_IFCHR, (1 << 8) | 11);
+    i64 nu = jbm_mknod("/dev/null", 0666 | S_IFCHR, (1 << 8) | 3);
+    jbm_log("jbm: dev_init mount=%d mknod console=%d kmsg=%d null=%d", (int)r, (int)c, (int)k,
+            (int)nu);
 #endif
     /* -1 leaves jbm_log() free to retry later if the console node was not
      * available yet when dev_init() ran. */
     jbm_klog_fd = -1;
+    jbm_log("jbm: dev_init done, klog_fd=%d kmsg_err=%d con_err=%d", jbm_klog_fd, jbm_kmsg_err,
+            jbm_con_err);
 }
 
 #ifdef JBM_HOST
@@ -1691,20 +1766,37 @@ int main(int argc, char **argv) {
 
 int jbm_main(int argc, char **argv, char **envp) {
     dev_init();
-    jbm_mount("proc", "/proc", "proc", 0, NULL);
-    jbm_mount("sysfs", "/sys", "sysfs", 0, NULL);
+    if (jbm_mount("proc", "/proc", "proc", 0, NULL) != 0)
+        jbm_log("jbm: mount /proc failed");
+    if (jbm_mount("sysfs", "/sys", "sysfs", 0, NULL) != 0)
+        jbm_log("jbm: mount /sys failed");
     jbm_log("jbm: v%s start argc=%d argv0=%s", JBM_VERSION, argc, argc > 0 && argv ? argv[0] : "-");
 
+    /* The display driver may register fb0 a few seconds after init starts, so
+     * poll for a while instead of giving up after 3 s. */
     int fb = 0;
-    for (int i = 0; i < 60; i++) {
+    int last_err = -1;
+    i64 t_first = jbm_now_ms();
+    for (int i = 0; i < 400; i++) {
+        gfx_quiet = (i != 0);
         if (gfx_open() == 0) {
             fb = 1;
+            jbm_log("jbm: fb ready after %lld ms (attempt %d)", (long long)(jbm_now_ms() - t_first), i);
             break;
+        }
+        if (gfx_err != last_err) {
+            jbm_log("jbm: fb attempt %d failed (err %d)", i, gfx_err);
+            last_err = gfx_err;
+        } else if (i % 40 == 39) {
+            jbm_log("jbm: fb still unavailable after %lld ms (err %d)",
+                    (long long)(jbm_now_ms() - t_first), gfx_err);
         }
         jbm_sleep_ms(50);
     }
+    gfx_quiet = 0;
     if (!fb) {
-        jbm_log("jbm: framebuffer unavailable, booting Android directly");
+        jbm_log("jbm: framebuffer unavailable after %lld ms, booting Android directly",
+                (long long)(jbm_now_ms() - t_first));
         cleanup_and_chain(argv, envp, "no framebuffer");
     }
 
@@ -1718,6 +1810,8 @@ int jbm_main(int argc, char **argv, char **envp) {
 
     i64 start = U.t0;
     i64 last_draw = 0;
+    int kicked = 0;
+    i64 kick_t = 0;
 
     for (;;) {
         i64 now = jbm_now_ms();
@@ -1781,6 +1875,17 @@ int jbm_main(int argc, char **argv, char **envp) {
             draw_ui();
             present();
             last_draw = now;
+            /* Two kicks: right after the first frame (so the layer is
+             * reprogrammed with the menu already in memory) and once more
+             * later, in case something re-asserts the boot logo. */
+            if (kicked == 0) {
+                kicked = 1;
+                kick_t = now;
+                gfx_kick();
+            } else if (kicked == 1 && now - kick_t > 1500) {
+                kicked = 2;
+                gfx_kick();
+            }
         } else {
             jbm_sleep_ms(8);
         }

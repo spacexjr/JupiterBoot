@@ -72,6 +72,14 @@ say "preparing staging copy"
 cp -a "$UNPACK" "$STAGE"
 cp -f "$STAGE/ramdisk.cpio" "$BUILD/ramdisk-orig.cpio"
 
+# The menu's diagnostics go through /dev/kmsg, but the default kernel ring
+# wraps within ~15 s of a busy boot and adb is only up at ~70 s, so the lines
+# are gone before anyone can read them. Growing the ring keeps the whole boot.
+if [ -f "$STAGE/header" ] && grep -q '^cmdline=' "$STAGE/header"; then
+  grep -q 'log_buf_len=' "$STAGE/header" ||
+    sed -i '/^cmdline=/ s/$/ log_buf_len=4M/' "$STAGE/header"
+fi
+
 say "swapping ramdisk /init for the boot manager"
 chmod 0750 "$BUILD/jbm_init"
 "$MAGISKBOOT" cpio "$STAGE/ramdisk.cpio" \
@@ -87,7 +95,9 @@ say "repacking boot image"
 
 say "verifying output"
 mkdir -p "$VERIFY"
-( cd "$VERIFY" && "$MAGISKBOOT" unpack "$IMG_OUT" >/dev/null )
+( cd "$VERIFY" && "$MAGISKBOOT" unpack -h "$IMG_OUT" >/dev/null )
+[ -f "$VERIFY/header" ] && grep -q '^cmdline=.*log_buf_len=4M' "$VERIFY/header" ||
+  die "cmdline of the output does not carry log_buf_len=4M"
 cmp -s "$VERIFY/ramdisk.cpio" "$STAGE/ramdisk.cpio" ||
   die "ramdisk read back from the output does not match the staged one"
 ( cd "$VERIFY" && "$MAGISKBOOT" cpio ramdisk.cpio test >/dev/null 2>&1 ) ||
