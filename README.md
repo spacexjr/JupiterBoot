@@ -1,7 +1,7 @@
 # jupiter-boot-menu
 
 A graphical, touch-driven boot menu injected into the `boot` ramdisk of a
-Samsung Galaxy A22 5G (`a22` / SM-A225M, MediaTek MT6768, Android 15 GSI).
+Samsung Galaxy A22 4G (`a22` / SM-A225M, MediaTek MT6768, Android 15 GSI).
 
 `/init` is replaced by a freestanding aarch64 binary; the original Android
 first-stage init is preserved as `/init.system` and is what the menu eventually
@@ -108,16 +108,10 @@ out/             build artifacts (jbm_init, boot-jbm.img, previews, staging)
 
 ## Known limitations
 
-- **Reboot reasons**: Recovery (`recovery`) and Download (`download`) use
-  `LINUX_REBOOT_CMD_RESTART2` with a reason string. Whether the A22 5G kernel
-  acts on those reasons is platform-specific and has **not** been tested on
-  hardware.
 - **Download/ODIN**: there is no known userspace trigger for MTK download mode;
   the menu only passes the `download` reason through `reboot` and logs it.
 - **AVB**: the image is built for an unlocked device (`verifiedbootstate=orange`,
   `avb_version=0`). It does not update `vbmeta`; do not flash it on a locked
   device.
-- **Touch/framebuffer**: verified against the `sec_touchscreen` event node and
-  `/dev/fb0`, but not yet exercised on hardware from this repository.
 - The actual Android boot through `/init.system` after the menu chains to it has
   not been validated on hardware from this repository.
