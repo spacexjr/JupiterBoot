@@ -76,10 +76,7 @@ Any touchscreen interaction cancels the automatic boot countdown.
 - ✅ Download
 - ✅ Reboot
 - ✅ Power Off
-
-### Not tested yet
-
-- ⏳ Fastboot
+- ✅ Fastboot
 
 The graphical **System starting screen** has been fixed and tested on real hardware.
 
