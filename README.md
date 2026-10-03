@@ -1,131 +1,203 @@
 # JupiterBoot
 
-A graphical, touch-driven boot menu injected into the `boot` ramdisk for the Samsung Galaxy A22 4G (`SM-A225M` / `a22`).
+A graphical, touch-driven boot menu injected into the `boot` ramdisk of the
+Samsung Galaxy A22 4G (`SM-A225M` / `a22`).
 
-JupiterBoot replaces the Android `/init` entry point with a freestanding AArch64 boot menu. The original Android first-stage init is preserved as `/init.system` and can be executed from the menu to continue the normal Android boot process.
+JupiterBoot replaces the Android `/init` entry point with a freestanding
+AArch64 boot menu. The original Android first-stage init is preserved as
+`/init.system` and can be executed by the menu to continue the normal Android
+boot process.
 
-> **⚠️ Warning:** JupiterBoot is experimental boot-chain software. Flashing a modified `boot.img` can prevent your device from booting if built incorrectly. Always keep a known-good stock `boot.img` and a reliable recovery/unbrick method (such as Odin) before testing.
+> **Warning:** JupiterBoot is experimental boot-chain software. Flashing a
+> modified `boot.img` can prevent the device from booting if the image is
+> incorrect. Always keep a known-good stock `boot.img` available.
 
-> **Note:** This repository does **not** flash your device. It only produces `out/boot-jbm.img`, which must be reviewed and flashed manually.
+The repository does **not** flash the device. The build system only produces
+`out/boot-jbm.img`, which must be reviewed and flashed manually.
+
+---
 
 ## Features
 
-- **Graphical framebuffer UI** – Clean, minimal boot menu rendered directly on the framebuffer
-- **Touchscreen navigation** – Tap to select actions with configurable hold durations
-- **Automatic boot countdown** – Falls back to System boot if left unattended
-- **Boot mode selection** – System, Recovery, Fastboot, Download, Reboot, and Power Off
-- **Safe fallback** – If the framebuffer cannot be initialized, JupiterBoot chains directly to `/init.system` without showing the UI
-- **Host UI preview** – Preview the menu on your host using the same drawing code
-- **Non-destructive by design** – No partition modification, flashing, or backups performed at runtime
+- Graphical framebuffer interface
+- Touchscreen navigation
+- Automatic boot countdown
+- System boot
+- Recovery reboot
+- Download Mode reboot
+- Device reboot
+- Power off
+- JupiterBoot graphical interface
+- Host-side UI preview
+- Freestanding AArch64 `/init`
+- Original Android `/init` preserved as `/init.system`
+
+---
 
 ## Boot Flow
 
-1. Bootloader loads `boot.img`
-2. Kernel starts `/init` (replaced by JupiterBoot)
-3. JupiterBoot initializes `/proc`, `/sys`, `/dev/fb0`, and touchscreen input
-4. Graphical boot menu is displayed
-5. Automatic boot countdown starts (cancellable by any touch input)
-6. User selects an action or allows countdown to expire
-7. If **System** is selected, JupiterBoot executes `/init.system`
-8. `/init.system` continues normal Android boot
+1. The bootloader loads `boot.img`.
+2. The kernel starts `/init`.
+3. JupiterBoot initializes `/proc`, `/sys`, `/dev/fb0`, and touchscreen input.
+4. The graphical boot menu is displayed.
+5. The automatic boot countdown starts.
+6. The user can select an action or allow the countdown to expire.
+7. When **System** is selected, JupiterBoot executes `/init.system`.
+8. `/init.system` continues the normal Android boot process.
+
+If the framebuffer cannot be initialized, JupiterBoot immediately chains to
+`/init.system` without displaying the graphical interface.
+
+---
 
 ## Menu Actions
 
-| Action | Hold Time | Behavior |
-|---|---|---|
-| **System** | Tap | Boots the installed Android OS via `/init.system` |
-| **Recovery** | 900 ms | Reboots with the `recovery` reboot reason |
-| **Fastboot** | 700 ms | Requests reboot to bootloader (Fastboot mode) |
-| **Download** | 900 ms | Reboots with the `download` reboot reason (ODIN/Download Mode) |
+| Action | Hold | Behaviour |
+|---|---:|---|
+| **System** | Tap | Starts the installed Android system through `/init.system` |
+| **Recovery** | 900 ms | Reboots with the `recovery` reason |
+| **Fastboot** | 700 ms | Requests a reboot to the bootloader |
+| **Download** | 900 ms | Reboots with the `download` reason |
 | **Reboot** | 700 ms | Restarts the device |
 | **Power Off** | 900 ms | Powers off the device |
 
 Any touchscreen interaction cancels the automatic boot countdown.
 
-## Compatibility & Testing
+---
 
-**Tested Device:** Samsung Galaxy A22 4G — `SM-A225M` (`a22`)
+## Tested on Real Hardware
 
-| Action | Status |
-|---|---|
-| System | ✅ Working |
-| Recovery | ✅ Working |
-| Download (ODIN) | ✅ Working |
-| Reboot | ✅ Working |
-| Power Off | ✅ Working |
-| Fastboot | ⏳ Untested (may vary by bootloader/SoC behavior) |
+**Samsung Galaxy A22 4G — SM-A225M**
 
-## Safety & Security
+### Confirmed working
 
-JupiterBoot is **read-only at runtime**. It does not perform partition flashing, copying, overwriting, or modification while running. The `boot` partition remains unmodified during menu operation.
+- ✅ System
+- ✅ Recovery
+- ✅ Download
+- ✅ Reboot
+- ✅ Power Off
 
-- **Recovery:** Performs `sync()` and calls `reboot(LINUX_REBOOT_CMD_RESTART2, "recovery")`. Whether the bootloader honors this reason is device/platform-dependent.
-- **Download:** Requests reboot with the `download` reason. No userspace flashing is performed.
-- **No runtime backups:** The legacy `/cache/jbmenu/boot.bak` backup mechanism has been removed in the current version. See [Restoring Stock](#restoring-the-stock-boot-image) if you need to recover.
+### Not tested yet
+
+- ⏳ Fastboot
+
+The graphical **System starting screen** has been fixed and tested on real hardware.
+
+### Charger / Offline Charging
+
+When the device is powered off and connected to a charger, the JupiterBoot
+menu can also appear during the device charging path. This suggests that the
+boot image is being entered through the device charger/off-mode boot path.
+
+The battery percentage displayed during this state appears to be obtained at
+runtime from the device battery/charger state rather than being a fixed value
+stored in the boot image. The exact bootloader/charger flag responsible for
+entering this path has not yet been fully identified.
+
+---
+
+## Safety Model
+
+JupiterBoot does not perform partition flashing or modification during normal
+menu operation.
+
+### Recovery
+
+The Recovery action does not write to flash. It synchronizes pending writes
+and requests a reboot with the `recovery` reason:
+
+```c
+reboot(
+    LINUX_REBOOT_MAGIC1,
+    LINUX_REBOOT_MAGIC2,
+    LINUX_REBOOT_CMD_RESTART2,
+    "recovery"
+);
+```
+
+Whether the bootloader honors this reboot reason depends on the device
+platform.
+
+### Download
+
+The Download action does not write to flash. It requests a reboot with the
+`download` reason. There is no userspace flashing operation performed by
+JupiterBoot.
+
+### Other Actions
+
+No menu action backs up, copies, overwrites, or modifies a partition.
+
+The `boot` partition is not modified while JupiterBoot is running.
+
+---
 
 ## Restoring the Stock Boot Image
 
-If you need to restore your original boot image:
+Earlier JupiterBoot builds could create a backup at:
 
-- **If you have an old backup** (from a previous JupiterBoot build): From root shell or recovery, run:
+```text
+/cache/jbmenu/boot.bak
+```
 
-  ```sh
-  dd if=/cache/jbmenu/boot.bak of=/dev/block/by-name/boot
-  sync
-  reboot
-  ```
+That backup mechanism has been removed from the current version.
 
-- **If no backup is available:** Restore the stock `boot.img` using Samsung's official flashing method (Odin). This is the recommended and safest approach.
+If you still have a backup from an older build, it can be restored from a
+root shell or recovery:
+
+```sh
+dd if=/cache/jbmenu/boot.bak of=/dev/block/by-name/boot
+sync
+```
+
+If no backup is available, restore the stock `boot.img` using your normal
+Samsung flashing method, such as Odin.
+
+---
 
 ## Build Requirements
 
-- `clang` (with AArch64 target support, e.g. `--target=aarch64-linux-gnu`)
-- `lld` (linker)
+- `clang`
+- AArch64 target support (`--target=aarch64-linux-gnu`)
+- `lld`
 - `nm`
 - `file`
 - `stat`
-- [`magiskboot`](https://github.com/topjohnwu/Magisk/releases) (available in PATH)
+- `magiskboot`
 - Python 3
-- [Pillow](https://pillow.readthedocs.io/) (only required when regenerating the font: `tools/gen_font.py`)
+- Pillow (only required when regenerating the font)
 
-The original stock `boot.img` for `SM-A225M` must be placed in the repository root before building.
+The original `boot.img` must be available in the repository root.
+
+---
 
 ## Building
-
-Build with the stock boot image in the repo root:
 
 ```sh
 ./build.sh
 ```
 
-Or specify a different boot image path:
+Or specify another boot image:
 
 ```sh
 ./build.sh path/to/boot.img
 ```
 
-### Build Steps
+The build process:
 
-1. Builds the host UI preview (`ui-preview.ppm`, `ui-preview-intro.ppm`)
-2. Compiles the freestanding AArch64 JupiterBoot binary (`jbm_init`)
-3. Verifies the binary has no undefined symbols
-4. Unpacks the original `boot.img`
-5. Renames the original `/init` to `/init.system`
-6. Installs JupiterBoot as `/init`
-7. Repacks the modified boot image
-8. Verifies the resulting ramdisk and generated `/init`
-9. Verifies the final image size matches the original (size-preserving)
+1. Builds the host UI preview.
+2. Compiles the freestanding AArch64 JupiterBoot binary.
+3. Verifies that the binary has no undefined symbols.
+4. Unpacks the original `boot.img`.
+5. Renames the original `/init` to `/init.system`.
+6. Installs JupiterBoot as `/init`.
+7. Repacks the boot image.
+8. Verifies the resulting ramdisk and generated `/init`.
+9. Verifies that the final image size is unchanged.
 
 The build process **does not flash the device**.
 
-## Flashing
-
-> **Critical:** Flashing a modified boot image carries risk. Double-check your build output, ensure you have a stock backup/Odin ready, and proceed at your own risk.
-
-1. Build successfully and verify `out/boot-jbm.img` exists
-2. Copy `out/boot-jbm.img` to your PC
-3. Flash using [Odin](https://samfw.com/odin) (or your preferred Samsung flashing tool) to the `BOOT` partition only
-4. Reboot and test the menu
+---
 
 ## Build Output
 
@@ -137,34 +209,42 @@ out/
 └── ui-preview-intro.ppm
 ```
 
-- `boot-jbm.img` – Modified boot image to flash manually
-- `jbm_init` – Compiled freestanding AArch64 binary
-- `ui-preview*.ppm` – Host-side UI previews rendered with the same framebuffer code
+`out/boot-jbm.img` is the modified boot image that must be manually reviewed
+before flashing.
+
+---
+
+## UI Preview
+
+The build system generates previews using the same drawing code used by the
+JupiterBoot framebuffer interface. This allows the menu to be tested on the
+host before deploying it to the device.
+
+---
 
 ## Configuration
 
-Build-time constants can be overridden via environment variables:
-
-| Variable | Default | Description |
-|---|---|---|
-| `JBM_AUTOBOOT_SEC` | As defined in build | Automatic boot timeout in seconds |
-| `JBM_VERSION` | As defined in build | Version string embedded in build |
-
-Example:
+Build-time constants can be overridden through environment variables:
 
 ```sh
-JBM_AUTOBOOT_SEC=10 JBM_VERSION=0.2.1 ./build.sh
+JBM_AUTOBOOT_SEC=10 JBM_VERSION=1.1 ./build.sh
 ```
 
-## Regenerating the Font
+---
 
-The bitmap font is generated from a source bitmap via `tools/gen_font.py`. Regenerate only if modifying font assets:
+## Regenerating the Font
 
 ```sh
 python3 tools/gen_font.py
 ```
 
-This regenerates `src/jbm_font.h`. Pillow is required.
+This requires Pillow and regenerates:
+
+```text
+src/jbm_font.h
+```
+
+---
 
 ## Project Structure
 
@@ -177,11 +257,13 @@ JupiterBoot/
 ├── tools/
 │   └── gen_font.py
 ├── build.sh
-├── boot.img        # Stock boot image (must be provided)
-└── out/            # Build artifacts
+├── boot.img
+└── out/
 ```
 
-## Device Info
+---
+
+## Device
 
 | Property | Value |
 |---|---|
@@ -190,20 +272,36 @@ JupiterBoot/
 | Codename | `a22` |
 | SoC | MediaTek MT6768 |
 | Architecture | AArch64 |
-| Android Target | Android 15 GSI |
+| Android target | Android 15 GSI |
+
+---
 
 ## Current Status
 
 **JupiterBoot 0.3 — Experimental**
 
-The graphical boot menu runs successfully on real SM-A225M hardware. System, Recovery, Download, Reboot, and Power Off are confirmed working on-device. **Fastboot** remains untested. 
+The graphical boot menu is successfully running on real SM-A225M hardware.
+
+System, Recovery, Download, Reboot, and Power Off have been confirmed on the
+device. The graphical System starting screen is also working on real hardware.
+Fastboot remains untested. The device can also enter the JupiterBoot UI while
+powered off and charging, which is currently being investigated as a charger/off-mode
+boot path.
+
+---
 
 ## Disclaimer
 
-This project is intended for development, testing, and experimentation only. Modifying and flashing boot images can result in a device that fails to boot. **Always** keep a known-good stock boot image and a reliable recovery method available before testing. Use at your own risk.
+This project is intended for development and experimentation.
 
-## Acknowledgements
+Modifying and flashing boot images can result in a device that does not boot.
+Always keep a known-good stock boot image and a reliable recovery method
+available before testing.
 
-Thanks to everyone testing, reporting issues, and contributing to JupiterBoot.
+---
 
-**JupiterBoot · Graphical Boot Menu for SM-A225M**
+## Thank You
+
+Thanks to everyone testing and contributing to JupiterBoot.
+
+**JupiterBoot · Boot Menu Project**
