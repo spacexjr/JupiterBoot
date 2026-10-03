@@ -1,10 +1,25 @@
 #!/usr/bin/env bash
-# Build the jbm_menu boot manager and inject it into the ramdisk of a
-# boot.img. Nothing is ever flashed: the result lands in out/boot-jbm.img
-# for manual review or for a later KernelSU/Odin step.
-#
-# magiskboot's unpack/repack work on the current directory only, so each step
-# below runs from inside its own staging directory.
+echo "========================================================"
+printf '\033[38;5;223m'
+echo '     ██╗██╗   ██╗██████╗ ██╗████████╗███████╗██████╗'
+
+printf '\033[38;5;222m'
+echo '     ██║██║   ██║██╔══██╗██║╚══██╔══╝██╔════╝██╔══██╗'
+
+printf '\033[38;5;221m'
+echo '     ██║██║   ██║██████╔╝██║   ██║   █████╗  ██████╔╝'
+
+printf '\033[38;5;220m'
+echo '██   ██║██║   ██║██╔═══╝ ██║   ██║   ██╔══╝  ██╔══██╗'
+
+printf '\033[38;5;179m'
+echo '╚█████╔╝╚██████╔╝██║     ██║   ██║   ███████╗██║  ██║'
+
+printf '\033[38;5;178m'
+echo ' ╚════╝  ╚═════╝ ╚═╝     ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝'
+
+printf '\033[0m'
+echo "========================================================"
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -120,4 +135,3 @@ cmp -s "$VERIFY/init" "$BUILD/jbm_init" ||
 printf '\ninput  : %s (%s bytes)\n' "$IMG_IN" "$(stat -c %s "$IMG_IN")"
 printf 'output : %s (%s bytes)\n' "$IMG_OUT" "$(stat -c %s "$IMG_OUT")"
 printf 'menu   : %s (%s bytes)\n' "$BUILD/jbm_init" "$(stat -c %s "$BUILD/jbm_init")"
-say "done - nothing was flashed"
