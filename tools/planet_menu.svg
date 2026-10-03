@@ -1,0 +1,84 @@
+    <svg viewBox="0 0 800 800"
+         xmlns="http://www.w3.org/2000/svg">
+
+        <defs>
+
+            <filter id="turbulence">
+                <feTurbulence
+                    type="fractalNoise"
+                    baseFrequency="0.008 0.035"
+                    numOctaves="4"
+                    seed="17"
+                    result="noise"/>
+
+                <feDisplacementMap
+                    in="SourceGraphic"
+                    in2="noise"
+                    scale="34"
+                    xChannelSelector="R"
+                    yChannelSelector="G"/>
+            </filter>
+
+            <radialGradient id="base"
+                            cx="31%"
+                            cy="32%"
+                            r="72%">
+
+                <stop offset="0%" stop-color="#d8b28d"/>
+                <stop offset="38%" stop-color="#b47c5c"/>
+                <stop offset="72%" stop-color="#85563f"/>
+                <stop offset="100%" stop-color="#39251f"/>
+
+            </radialGradient>
+
+            <clipPath id="planetClip">
+                <circle cx="400" cy="400" r="390"/>
+            </clipPath>
+
+        </defs>
+
+        <circle
+            cx="400"
+            cy="400"
+            r="390"
+            fill="url(#base)"/>
+
+        <g
+            clip-path="url(#planetClip)"
+            filter="url(#turbulence)">
+
+            <path
+                d="M-50 110 C180 65 290 155 480 105 C650 60 760 100 850 125 L850 185 C650 160 570 145 400 175 C220 205 100 160 -50 195Z"
+                fill="#8b5c45"/>
+
+            <path
+                d="M-50 180 C130 135 270 220 455 180 C630 140 750 200 850 175 L850 255 C680 270 560 220 400 245 C220 275 100 225 -50 270Z"
+                fill="#d2a27c"/>
+
+            <path
+                d="M-50 255 C120 220 270 285 430 255 C610 220 750 280 850 245 L850 335 C680 350 560 300 400 325 C220 350 100 305 -50 350Z"
+                fill="#79503e"/>
+
+            <path
+                d="M-50 340 C130 300 250 375 430 340 C610 305 730 360 850 335 L850 425 C670 445 560 385 390 420 C210 450 100 395 -50 445Z"
+                fill="#c89470"/>
+
+            <path
+                d="M-50 430 C130 390 260 470 440 430 C620 390 740 450 850 420 L850 515 C670 535 550 475 390 510 C210 545 100 485 -50 535Z"
+                fill="#704839"/>
+
+            <path
+                d="M-50 520 C120 480 270 555 450 515 C620 480 750 535 850 505 L850 600 C680 620 550 565 390 595 C210 630 90 570 -50 625Z"
+                fill="#c18a67"/>
+
+            <path
+                d="M-50 610 C140 570 270 645 450 605 C620 570 750 625 850 595 L850 690 C680 710 550 655 390 685 C210 720 100 665 -50 715Z"
+                fill="#765040"/>
+
+            <path
+                d="M-50 700 C150 660 280 735 460 690 C620 660 740 710 850 685 L850 850 L-50 850Z"
+                fill="#b77f60"/>
+
+        </g>
+
+    </svg>

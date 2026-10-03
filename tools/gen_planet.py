@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Gera src/jbm_planet_menu.h e src/jbm_planet_boot.h a partir dos mocks.
+
+Cada tela tem geometria propria (caixa do planeta, escala/rotacao do SVG e
+filtros do CSS), e so' a fatia visivel em 720x1600 e' embutida.
+"""
+import os
+import subprocess
+import sys
+
+import numpy as np
+from PIL import Image, ImageEnhance
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCREEN_W, SCREEN_H = 720, 1600
+
+SCREENS = {
+    "menu": dict(
+        html="jbtest.html",
+        svg="tools/planet_menu.svg",
+        png="/tmp/opencode/planet_menu.png",
+        out="src/jbm_planet_menu.h",
+        prefix="PLM",
+        vb=800,           # viewBox do SVG
+        box=800,          # .jupiter width/height
+        right=-365,       # .jupiter right
+        ss=2.5,           # supersampling (px por px CSS)
+        elem_css=1000,    # .jupiter svg { width:125% }
+        elem_off=-96,     # .jupiter svg { left/top:-12% }
+        rot=-4.0,         # .jupiter svg { transform: rotate(-4deg) }
+        sat=0.78,         # filter: saturate(.78) contrast(1.04)
+        con=1.04,
+    ),
+    "boot": dict(
+        html="jbbootingtest.html",
+        svg="tools/planet_boot.svg",
+        png="/tmp/opencode/planet_boot.png",
+        out="src/jbm_planet_boot.h",
+        prefix="PLB",
+        vb=850,
+        box=650,          # @media (max-width:900px)
+        right=-310,
+        ss=2.5,
+        elem_css=650,
+        elem_off=0,
+        rot=0.0,
+        sat=None,
+        con=None,
+    ),
+}
+
+
+def extract_svg(cfg):
+    path = os.path.join(ROOT, cfg["html"])
+    with open(path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    start = next(i for i, l in enumerate(lines) if l.lstrip().startswith("<svg"))
+    end = next(i for i, l in enumerate(lines) if "</svg>" in l and i >= start)
+    body = "".join(lines[start : end + 1])
+    dst = os.path.join(ROOT, cfg["svg"])
+    old = None
+    if os.path.exists(dst):
+        with open(dst, "r", encoding="utf-8") as f:
+            old = f.read()
+    if body != old:
+        with open(dst, "w", encoding="utf-8") as f:
+            f.write(body)
+        print("%s atualizado (%d bytes)" % (cfg["svg"], len(body)))
+
+
+def render(cfg):
+    png = cfg["png"]
+    svg = os.path.join(ROOT, cfg["svg"])
+    if os.path.exists(png) and os.path.getmtime(png) >= os.path.getmtime(svg):
+        return
+    os.makedirs(os.path.dirname(png), exist_ok=True)
+    # 1 px do render = ss px CSS do elemento; o viewBox inteiro = elem_css.
+    export = int(round(cfg["ss"] * cfg["elem_css"]))
+    subprocess.run(
+        ["inkscape", svg, "--export-type=png",
+         "--export-filename=" + png, "--export-width=%d" % export,
+         "--export-background-opacity=0"],
+        check=True,
+    )
+
+
+def build(cfg):
+    """Devolve (paleta, indices, mascara, x, y) ja' em pixels de tela."""
+    box, ss, eoff = cfg["box"], cfg["ss"], cfg["elem_off"]
+    left = SCREEN_W - box - cfg["right"]     # right:-365 -> left 285
+    top = (SCREEN_H - box) // 2
+    slice_w = SCREEN_W - left
+
+    im = Image.open(cfg["png"]).convert("RGBA")
+    if cfg["rot"]:
+        im = im.rotate(-cfg["rot"], resample=Image.BICUBIC, expand=True)
+
+    # centro da caixa, em coordenadas do canvas (o rotate preserva o centro)
+    off = (box / 2.0 - eoff - cfg["elem_css"] / 2.0) * ss
+    cx, cy = im.width / 2.0 + off, im.height / 2.0 + off
+    half = box * ss / 2.0
+    crop = im.crop((int(round(cx - half)), int(round(cy - half)),
+                    int(round(cx + half)), int(round(cy + half))))
+
+    if cfg["sat"] is not None:
+        rgb = ImageEnhance.Color(crop.convert("RGB")).enhance(cfg["sat"])
+        rgb = ImageEnhance.Contrast(rgb).enhance(cfg["con"])
+        a = crop.split()[3]
+        crop = Image.merge("RGBA", (*rgb.split(), a))
+
+    # clip: .jupiter { border-radius:50%; overflow:hidden }
+    n = crop.width
+    yy, xx = np.mgrid[0:n, 0:n]
+    r = n / 2.0
+    disc = ((xx - r + 0.5) ** 2 + (yy - r + 0.5) ** 2) <= (r - 1.0) ** 2
+    rgba = np.array(crop)
+    rgba[:, :, 3] = np.where(disc, rgba[:, :, 3], 0)
+
+    dev = Image.fromarray(rgba, "RGBA").resize((box, box), Image.LANCZOS)
+    dev = dev.crop((0, 0, slice_w, box))
+
+    arr = np.array(dev)
+    mask = arr[:, :, 3] >= 128
+    if not mask.any():
+        sys.exit("planeta vazio para %s: o render do SVG falhou?" % cfg["html"])
+    rgb = arr[:, :, :3].copy()
+    if (~mask).any():
+        rgb[~mask] = rgb[mask].mean(axis=0).astype(np.uint8)
+
+    pal_img = Image.fromarray(rgb, "RGB").quantize(
+        colors=256, method=Image.MEDIANCUT, dither=Image.Dither.NONE
+    )
+    pal = np.array(pal_img.getpalette()[: 256 * 3], dtype=np.uint8).reshape(-1, 3)
+    idx = np.array(pal_img, dtype=np.uint8)
+    return pal, idx, mask, left, top
+
+
+def emit(cfg, pal, idx, mask, x, y):
+    p = cfg["prefix"]
+    h, w = idx.shape
+    out = []
+    a = out.append
+    a("/* Generated by tools/gen_planet.py -- do not edit by hand. */")
+    a("#ifndef JBM_PLANET_%s_H" % p)
+    a("#define JBM_PLANET_%s_H" % p)
+    a("")
+    a("/* Fatia visivel do planeta do mock %s em 720x1600. */" % cfg["html"])
+    a("#define %s_W %d" % (p, w))
+    a("#define %s_H %d" % (p, h))
+    a("#define %s_X %d" % (p, x))
+    a("#define %s_Y %d" % (p, y))
+    a("")
+    a("static const unsigned int %s_PAL[256] = {" % p)
+    for i in range(0, 256, 4):
+        cells = ["0xFF%02X%02X%02X" % tuple(pal[j]) for j in range(i, min(i + 4, 256))]
+        a("    " + ", ".join(cells) + ",")
+    a("};")
+    a("")
+    flat = idx.reshape(-1)
+    a("static const unsigned char %s_IDX[%d] = {" % (p, flat.size))
+    for i in range(0, flat.size, 32):
+        a(",".join(str(int(v)) for v in flat[i : i + 32]) + ",")
+    a("};")
+    a("")
+    bits = np.packbits(mask.reshape(-1).astype(np.uint8), bitorder="big")
+    a("static const unsigned char %s_MASK[%d] = {" % (p, bits.size))
+    for i in range(0, bits.size, 32):
+        a(",".join(str(int(v)) for v in bits[i : i + 32]) + ",")
+    a("};")
+    a("")
+    a("#endif")
+    with open(os.path.join(ROOT, cfg["out"]), "w", encoding="utf-8") as f:
+        f.write("\n".join(out) + "\n")
+    kb = (flat.size + bits.size + 1024) // 1024
+    print("%s: %dx%d em (%d,%d), %d KB" % (cfg["out"], w, h, x, y, kb))
+
+
+def preview(name, pal, idx, mask, x, y):
+    h, w = idx.shape
+    rgb = pal[idx].reshape(h, w, 3)
+    rgb[~mask] = 0
+    prev = np.zeros((SCREEN_H, SCREEN_W, 3), dtype=np.uint8)
+    prev[y : y + h, x : x + w] = rgb
+    Image.fromarray(prev).save("/tmp/opencode/slice_%s.png" % name)
+
+
+def main():
+    for name, cfg in SCREENS.items():
+        extract_svg(cfg)
+        render(cfg)
+        pal, idx, mask, x, y = build(cfg)
+        emit(cfg, pal, idx, mask, x, y)
+        preview(name, pal, idx, mask, x, y)
+
+
+if __name__ == "__main__":
+    main()

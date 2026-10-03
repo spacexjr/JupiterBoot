@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JupiterBoot — Booting System</title>
+
+<style>
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #020202;
+    font-family: Arial, Helvetica, sans-serif;
+    color: #eee;
+}
+
+/* =========================
+   SPACE
+========================= */
+
+.space {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    background:
+        radial-gradient(
+            circle at 20% 45%,
+            rgba(130, 72, 30, 0.08),
+            transparent 35%
+        ),
+        radial-gradient(
+            circle at 80% 50%,
+            rgba(180, 100, 40, 0.04),
+            transparent 40%
+        ),
+        #020202;
+}
+
+/* Stars */
+
+.stars,
+.stars::before,
+.stars::after {
+    position: absolute;
+    inset: 0;
+    content: "";
+    pointer-events: none;
+}
+
+.stars {
+    background-image:
+        radial-gradient(circle, rgba(255,255,255,.8) 0 1px, transparent 1.5px),
+        radial-gradient(circle, rgba(255,255,255,.45) 0 1px, transparent 1.5px),
+        radial-gradient(circle, rgba(255,255,255,.6) 0 1px, transparent 1.5px);
+    background-size:
+        173px 211px,
+        251px 187px,
+        331px 293px;
+    background-position:
+        20px 40px,
+        100px 120px,
+        240px 30px;
+    opacity: .5;
+}
+
+/* =========================
+   JUPITER
+========================= */
+
+.jupiter {
+    position: absolute;
+
+    width: 850px;
+    height: 850px;
+
+    right: -330px;
+    top: 50%;
+    transform: translateY(-50%);
+
+    border-radius: 50%;
+    overflow: hidden;
+
+    filter:
+        drop-shadow(-35px 0 55px rgba(0,0,0,.95))
+        drop-shadow(-5px 0 25px rgba(180,100,40,.15));
+
+    opacity: .98;
+}
+
+.jupiter svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+/* Atmospheric edge */
+
+.jupiter::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+
+    border-radius: 50%;
+
+    background:
+        radial-gradient(
+            circle at 18% 45%,
+            transparent 50%,
+            rgba(0,0,0,.15) 68%,
+            rgba(0,0,0,.75) 100%
+        );
+
+    pointer-events: none;
+}
+
+/* =========================
+   INTERFACE
+========================= */
+
+.interface {
+    position: absolute;
+
+    left: 7vw;
+    top: 9vh;
+
+    width: 390px;
+
+    z-index: 10;
+}
+
+/* =========================
+   BRAND
+========================= */
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+}
+
+.brand-icon {
+    position: relative;
+
+    width: 58px;
+    height: 58px;
+
+    border: 2px solid #c87335;
+    border-radius: 50%;
+
+    transform: rotate(-18deg);
+
+    opacity: .95;
+}
+
+.brand-icon::before {
+    content: "";
+
+    position: absolute;
+
+    width: 70px;
+    height: 22px;
+
+    left: -8px;
+    top: 16px;
+
+    border: 2px solid #c87335;
+    border-radius: 50%;
+
+    transform: rotate(-15deg);
+}
+
+.brand-icon::after {
+    content: "";
+
+    position: absolute;
+
+    width: 8px;
+    height: 8px;
+
+    right: -3px;
+    top: 7px;
+
+    background: #c87335;
+
+    border-radius: 50%;
+}
+
+.brand-name {
+    font-size: 30px;
+    font-weight: 300;
+    letter-spacing: 4px;
+}
+
+.brand-name span {
+    color: #c87335;
+}
+
+.device {
+    margin-top: 8px;
+
+    font-size: 14px;
+    letter-spacing: 4px;
+
+    color: #999;
+}
+
+/* =========================
+   BOOT STATUS
+========================= */
+
+.boot-content {
+    margin-top: 180px;
+}
+
+.boot-label {
+    font-size: 17px;
+    letter-spacing: 7px;
+
+    color: #ddd;
+
+    margin-bottom: 18px;
+}
+
+.boot-system {
+    font-size: 54px;
+    font-weight: 300;
+
+    letter-spacing: 14px;
+
+    color: #c87335;
+
+    margin-left: -2px;
+}
+
+.starting {
+    margin-top: 42px;
+
+    font-size: 20px;
+    font-weight: 300;
+
+    letter-spacing: 5px;
+
+    color: #ddd;
+}
+
+/* =========================
+   LOADING
+========================= */
+
+.loader {
+    position: relative;
+
+    width: 70px;
+    height: 70px;
+
+    margin-top: 48px;
+}
+
+.loader::before {
+    content: "";
+
+    position: absolute;
+    inset: 0;
+
+    border-radius: 50%;
+
+    border: 6px solid rgba(255,255,255,.10);
+
+    transform: rotate(-20deg);
+}
+
+.loader::after {
+    content: "";
+
+    position: absolute;
+    inset: 0;
+
+    border-radius: 50%;
+
+    border: 6px solid transparent;
+
+    border-top-color: #c87335;
+    border-right-color: #c87335;
+
+    animation: spin 1.15s linear infinite;
+}
+
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* =========================
+   FOOTER
+========================= */
+
+.footer {
+    position: absolute;
+
+    left: 7vw;
+    bottom: 7vh;
+
+    z-index: 10;
+
+    font-size: 11px;
+
+    letter-spacing: 4px;
+
+    color: #666;
+}
+
+.footer span {
+    color: #8b542f;
+}
+
+/* =========================
+   RESPONSIVE
+========================= */
+
+@media (max-width: 900px) {
+
+    .interface {
+        left: 6vw;
+    }
+
+    .jupiter {
+        width: 650px;
+        height: 650px;
+
+        right: -310px;
+    }
+
+    .boot-content {
+        margin-top: 130px;
+    }
+}
+
+@media (max-width: 600px) {
+
+    .interface {
+        left: 30px;
+        top: 35px;
+        width: calc(100% - 60px);
+    }
+
+    .brand-name {
+        font-size: 23px;
+    }
+
+    .brand-icon {
+        width: 45px;
+        height: 45px;
+    }
+
+    .brand-icon::before {
+        width: 55px;
+        height: 18px;
+        top: 12px;
+        left: -7px;
+    }
+
+    .boot-content {
+        margin-top: 120px;
+    }
+
+    .boot-label {
+        font-size: 13px;
+        letter-spacing: 5px;
+    }
+
+    .boot-system {
+        font-size: 40px;
+        letter-spacing: 9px;
+    }
+
+    .starting {
+        font-size: 15px;
+        letter-spacing: 3px;
+    }
+
+    .jupiter {
+        width: 560px;
+        height: 560px;
+
+        right: -340px;
+        opacity: .7;
+    }
+
+    .footer {
+        left: 30px;
+        bottom: 30px;
+    }
+}
+</style>
+
+</head>
+
+<body>
+
+<div class="space">
+
+```
+<div class="stars"></div>
+
+<!-- =========================
+     JUPITER
+========================== -->
+
+<div class="jupiter">
+
+    <svg viewBox="0 0 850 850"
+         xmlns="http://www.w3.org/2000/svg">
+
+        <defs>
+
+            <!-- Base Jupiter texture -->
+            <filter id="jupiterTexture"
+                    x="-30%"
+                    y="-30%"
+                    width="160%"
+                    height="160%">
+
+                <feTurbulence
+                    type="fractalNoise"
+                    baseFrequency="0.018 0.075"
+                    numOctaves="5"
+                    seed="17"
+                    result="noise"/>
+
+                <feColorMatrix
+                    in="noise"
+                    type="saturate"
+                    values="0"
+                    result="grayNoise"/>
+
+                <feDisplacementMap
+                    in="SourceGraphic"
+                    in2="grayNoise"
+                    scale="18"
+                    xChannelSelector="R"
+                    yChannelSelector="G"/>
+
+            </filter>
+
+            <!-- Jupiter colors -->
+            <radialGradient id="jupiterBase"
+                cx="34%"
+                cy="38%"
+                r="70%">
+
+                <stop offset="0%"
+                      stop-color="#f0dfc2"/>
+
+                <stop offset="22%"
+                      stop-color="#c9a77d"/>
+
+                <stop offset="45%"
+                      stop-color="#8f6347"/>
+
+                <stop offset="68%"
+                      stop-color="#5a392a"/>
+
+                <stop offset="88%"
+                      stop-color="#241712"/>
+
+                <stop offset="100%"
+                      stop-color="#070504"/>
+
+            </radialGradient>
+
+            <!-- Warm atmospheric bands -->
+            <linearGradient id="band1"
+                x1="0"
+                y1="0"
+                x2="1"
+                y2="0">
+
+                <stop offset="0"
+                      stop-color="#7a5038"/>
+
+                <stop offset=".5"
+                      stop-color="#c49b70"/>
+
+                <stop offset="1"
+                      stop-color="#4d2f24"/>
+
+            </linearGradient>
+
+            <linearGradient id="band2"
+                x1="0"
+                y1="0"
+                x2="1"
+                y2="0">
+
+                <stop offset="0"
+                      stop-color="#d8c3a5"/>
+
+                <stop offset=".5"
+                      stop-color="#f0dfc1"/>
+
+                <stop offset="1"
+                      stop-color="#86624a"/>
+
+            </linearGradient>
+
+            <linearGradient id="band3"
+                x1="0"
+                y1="0"
+                x2="1"
+                y2="0">
+
+                <stop offset="0"
+                      stop-color="#4e3024"/>
+
+                <stop offset=".5"
+                      stop-color="#9a6545"/>
+
+                <stop offset="1"
+                      stop-color="#392119"/>
+
+            </linearGradient>
+
+            <clipPath id="planetClip">
+                <circle cx="425"
+                        cy="425"
+                        r="410"/>
+            </clipPath>
+
+            <!-- Great Red Spot -->
+            <radialGradient id="redSpot"
+                cx="45%"
+                cy="40%">
+
+                <stop offset="0"
+                      stop-color="#a65b3d"/>
+
+                <stop offset=".45"
+                      stop-color="#7b3929"/>
+
+                <stop offset=".75"
+                      stop-color="#51251c"/>
+
+                <stop offset="1"
+                      stop-color="#2a120d"/>
+
+            </radialGradient>
+
+        </defs>
+
+        <!-- Planet -->
+        <circle
+            cx="425"
+            cy="425"
+            r="410"
+            fill="url(#jupiterBase)"
+        />
+
+        <g clip-path="url(#planetClip)"
+           filter="url(#jupiterTexture)">
+
+            <!-- Soft atmospheric turbulence bands -->
+
+            <path
+                d="M-50 160
+                   C170 115 290 190 510 145
+                   C700 110 820 145 920 120
+                   L920 205
+                   C720 235 620 185 430 220
+                   C240 255 120 200 -50 240 Z"
+                fill="url(#band2)"
+                opacity=".85"
+            />
+
+            <path
+                d="M-40 255
+                   C170 205 310 285 490 250
+                   C700 210 820 260 910 230
+                   L910 310
+                   C720 340 620 300 450 330
+                   C260 360 130 310 -40 340 Z"
+                fill="url(#band1)"
+                opacity=".8"
+            />
+
+            <path
+                d="M-40 350
+                   C160 310 270 390 480 350
+                   C690 315 820 360 900 330
+                   L900 405
+                   C700 435 610 410 430 435
+                   C250 465 120 420 -40 445 Z"
+                fill="url(#band2)"
+                opacity=".9"
+            />
+
+            <path
+                d="M-40 445
+                   C160 400 300 480 500 445
+                   C680 415 800 460 900 435
+                   L900 515
+                   C710 545 600 505 430 540
+                   C250 575 120 525 -40 550 Z"
+                fill="url(#band3)"
+                opacity=".85"
+            />
+
+            <path
+                d="M-40 555
+                   C170 510 310 590 500 555
+                   C680 520 800 565 900 535
+                   L900 625
+                   C700 650 600 620 430 650
+                   C260 675 120 630 -40 655 Z"
+                fill="url(#band2)"
+                opacity=".75"
+            />
+
+            <path
+                d="M-40 660
+                   C160 620 300 690 500 665
+                   C680 640 810 675 900 645
+                   L900 740
+                   C700 770 590 735 420 760
+                   C250 785 120 745 -40 765 Z"
+                fill="url(#band1)"
+                opacity=".7"
+            />
+
+            <!-- Fine cloud streaks -->
+
+            <path
+                d="M30 220
+                   C210 195 290 230 430 210
+                   C570 190 690 220 820 190"
+                fill="none"
+                stroke="#eee0c8"
+                stroke-width="16"
+                opacity=".28"
+            />
+
+            <path
+                d="M0 300
+                   C180 270 300 315 460 290
+                   C620 265 730 305 860 275"
+                fill="none"
+                stroke="#f3e5ca"
+                stroke-width="11"
+                opacity=".25"
+            />
+
+            <path
+                d="M0 510
+                   C180 480 290 530 450 505
+                   C620 480 730 520 880 490"
+                fill="none"
+                stroke="#e7c6a0"
+                stroke-width="13"
+                opacity=".23"
+            />
+
+            <path
+                d="M20 600
+                   C190 570 300 620 460 595
+                   C620 570 750 610 880 580"
+                fill="none"
+                stroke="#f1dcc0"
+                stroke-width="9"
+                opacity=".2"
+            />
+
+        </g>
+
+        <!-- Great Red Spot -->
+
+        <ellipse
+            cx="535"
+            cy="500"
+            rx="88"
+            ry="52"
+            fill="url(#redSpot)"
+            opacity=".95"
+        />
+
+        <ellipse
+            cx="535"
+            cy="500"
+            rx="65"
+            ry="35"
+            fill="none"
+            stroke="#bd7350"
+            stroke-width="5"
+            opacity=".25"
+        />
+
+        <ellipse
+            cx="535"
+            cy="500"
+            rx="45"
+            ry="22"
+            fill="#4b2118"
+            opacity=".3"
+        />
+
+        <!-- Atmospheric edge lighting -->
+
+        <circle
+            cx="425"
+            cy="425"
+            r="409"
+            fill="none"
+            stroke="#e8c29a"
+            stroke-width="3"
+            opacity=".2"
+        />
+
+    </svg>
+
+</div>
+
+<!-- =========================
+     INTERFACE
+========================== -->
+
+<main class="interface">
+
+    <header>
+
+        <div class="brand">
+
+            <div class="brand-icon"></div>
+
+            <div>
+                <div class="brand-name">
+                    Jupiter<span>Boot</span>
+                </div>
+
+                <div class="device">
+                    
+                </div>
+            </div>
+
+        </div>
+
+    </header>
+
+
+<section class="boot-content"> <div class="boot-label"> STARTING </div> <div class="boot-system"> SYSTEM </div> <div class="starting"> Starting Android... </div> <div class="loader"></div> </section>
+</main>
+
+
+<footer class="footer">
+    <span>JUPITERBOOT</span> · SYSTEM
+</footer>
+```
+
+</div>
+
+</body>
+</html>
