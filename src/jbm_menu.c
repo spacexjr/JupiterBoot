@@ -38,6 +38,11 @@ struct jbm_timespec {
 /* Duration of the entry slide-in animation, in ms. */
 #define JBM_INTRO_MS 480
 
+/* How long the "starting X" screen stays up before the action is carried out,
+ * in ms. Long enough for the spinner to be seen, short enough not to be in the
+ * way. */
+#define JBM_RUN_MS 1400
+
 /* errno of the last failed jbm_mmap(), 0 otherwise (diagnostics only). */
 static int jbm_mmap_err = 0;
 
@@ -603,6 +608,7 @@ struct gfx {
     int fd;
     u8 *mem;
     u8 *cv;
+    u8 *bg;
     u32 stride;
     u32 len;
     u32 w, h, bpp;
@@ -733,10 +739,20 @@ static int gfx_open(void) {
         jbm_close(fd);
         return -1;
     }
+    /* The sky and the planet never change, so they are painted once into their
+     * own buffer and copied back into the canvas each frame; only the strip of
+     * screen the menus live in is redrawn. */
+    u8 *bg = (u8 *)jbm_mmap(stride * var.yres, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (!bg) {
+        jbm_log("jbm: background alloc failed");
+        jbm_close(fd);
+        return -1;
+    }
 
     G.fd = fd;
     G.mem = mem;
     G.cv = cv;
+    G.bg = bg;
     G.stride = stride;
     G.len = len;
     G.w = var.xres;
@@ -939,36 +955,6 @@ static void arc(int cx, int cy, int r, int th, int a0, int a1, u32 c) {
     }
 }
 
-static void tri(int x1, int y1, int x2, int y2, int x3, int y3, u32 c) {
-    int xs[3], ys[3];
-    xs[0] = x1;
-    xs[1] = x2;
-    xs[2] = x3;
-    ys[0] = y1;
-    ys[1] = y2;
-    ys[2] = y3;
-    int ymin = y1 < y2 ? y1 : y2, ymax = y1 > y2 ? y1 : y2;
-    if (y3 < ymin) ymin = y3;
-    if (y3 > ymax) ymax = y3;
-    for (int y = ymin; y <= ymax; y++) {
-        int lo = 0x7FFFFFFF, hi = -0x7FFFFFFF;
-        for (int e = 0; e < 3; e++) {
-            int ax = xs[e], ay = ys[e], bx = xs[(e + 1) % 3], by = ys[(e + 1) % 3];
-            if (ay == by) continue;
-            if (!((y >= ay && y < by) || (y >= by && y < ay))) continue;
-            int x = ax + (int)((i64)(bx - ax) * (y - ay) / (by - ay));
-            if (x < lo) lo = x;
-            if (x > hi) hi = x;
-        }
-        if (hi >= lo) fill_rect(lo, y, hi - lo + 1, 1, c);
-    }
-}
-
-static void quad(int x1, int y1, int x2, int y2, int x3, int y3, int x4, int y4, u32 c) {
-    tri(x1, y1, x2, y2, x3, y3, c);
-    tri(x1, y1, x3, y3, x4, y4, c);
-}
-
 /* ------------------------------------------------------------------ */
 /* text                                                                */
 /* ------------------------------------------------------------------ */
@@ -999,25 +985,37 @@ static float glyph_adv(struct font *f, int idx, float k) { return (float)f->meta
 
 static float scale_of(struct font *f, float px) { return px / (float)f->px; }
 
-static int measure(struct font *f, const char *s, float px) {
-    float k = scale_of(f, px);
-    float w = 0;
+/* The atlases only hold ASCII, so the middle dot used as a separator in the
+ * design is drawn instead of rasterised. */
+#define GLYPH_DOT 0xB7
+
+/* Advance of one character in pixels, -1 when the font cannot draw it. */
+static int char_adv(struct font *f, int ch, float px) {
+    if (ch == GLYPH_DOT) return (int)(px * 0.34f + 0.5f);
+    int i = ch - f->first;
+    if (i < 0 || i >= f->count) return -1;
+    return (int)(glyph_adv(f, i, scale_of(f, px)) + 0.5f);
+}
+
+static int measure_ls(struct font *f, const char *s, float px, int ls) {
+    int w = 0;
     for (const char *p = s; *p; p++) {
-        int i = (int)(u8)*p - f->first;
-        if (i < 0 || i >= f->count) continue;
-        w += glyph_adv(f, i, k);
+        int a = char_adv(f, (int)(u8)*p, px);
+        if (a < 0) continue;
+        w += a + ls;
     }
-    return (int)(w + 0.5f);
+    return w > 0 ? w - ls : 0;
 }
 
 static int line_h(float px) { return (int)(px * 1.32f + 0.5f); }
 
-static void draw_text(struct font *f, int x, int y, float px, u32 argb, const char *s, int align) {
+static void draw_text_ls(struct font *f, int x, int y, float px, u32 argb, const char *s, int align,
+                         int ls) {
     if (!f->count) return;
     float k = scale_of(f, px);
     int lh = line_h(px);
-    if (align & TA_C) x -= measure(f, s, px) / 2;
-    else if (align & TA_R) x -= measure(f, s, px);
+    if (align & TA_C) x -= measure_ls(f, s, px, ls) / 2;
+    else if (align & TA_R) x -= measure_ls(f, s, px, ls);
     if (align & VA_M) y -= lh / 2;
     else if (align & VA_B) y -= lh;
 
@@ -1025,7 +1023,15 @@ static void draw_text(struct font *f, int x, int y, float px, u32 argb, const ch
     u32 rgb = argb & 0xFFFFFF;
 
     for (const char *p = s; *p; p++) {
-        int idx = (int)(u8)*p - f->first;
+        int ch = (int)(u8)*p;
+        if (ch == GLYPH_DOT) {
+            int rr = (int)(px / 26.0f);
+            if (rr < 1) rr = 1;
+            disc(x + (int)(px * 0.17f) + ls / 2, y + (int)(px * 0.55f), rr, (alpha << 24) | rgb);
+            x += char_adv(f, ch, px) + ls;
+            continue;
+        }
+        int idx = ch - f->first;
         if (idx < 0 || idx >= f->count) continue;
         const short *m = f->meta[idx];
         int gw = m[2], gh = m[3];
@@ -1062,8 +1068,26 @@ static void draw_text(struct font *f, int x, int y, float px, u32 argb, const ch
                 }
             }
         }
-        x += (int)(glyph_adv(f, idx, k) + 0.5f);
+        x += (int)(glyph_adv(f, idx, k) + 0.5f) + ls;
     }
+}
+
+static void draw_text(struct font *f, int x, int y, float px, u32 argb, const char *s, int align) {
+    draw_text_ls(f, x, y, px, argb, s, align, 0);
+}
+
+/* Two runs of text in two colours, laid out and aligned as a single string. */
+static void draw_pair(struct font *f, int x, int y, float px, int align, int ls, u32 c1, const char *s1,
+                      u32 c2, const char *s2) {
+    int w1 = measure_ls(f, s1, px, ls);
+    int w2 = measure_ls(f, s2, px, ls);
+    int lh = line_h(px);
+    if (align & TA_C) x -= (w1 + w2) / 2;
+    else if (align & TA_R) x -= w1 + w2;
+    if (align & VA_M) y -= lh / 2;
+    else if (align & VA_B) y -= lh;
+    draw_text_ls(f, x, y, px, c1, s1, TA_L, ls);
+    draw_text_ls(f, x + w1, y, px, c2, s2, TA_L, ls);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1301,14 +1325,14 @@ static void touch_poll(void) {
 #define ACT_COUNT 6
 enum { ACT_SYSTEM, ACT_RECOVERY, ACT_FASTBOOT, ACT_DOWNLOAD, ACT_REBOOT, ACT_POWEROFF };
 
-static const char *act_label[ACT_COUNT] = {"System",      "Recovery",   "Fastboot",
-                                           "Download",    "Reboot",     "Power off"};
-static const char *act_sub[ACT_COUNT] = {"Boot installed Android", "Reboot to recovery",
-                                         "Reboot to bootloader",   "Enter download / ODIN mode",
-                                         "Restart the device",     "Shut the device down"};
-static const u32 act_color[ACT_COUNT] = {0x34D399, 0x60A5FA, 0xFBBF24,
-                                         0xA78BFA, 0x22D3EE, 0xF87171};
-static const int act_hold_ms[ACT_COUNT] = {0, 900, 700, 900, 700, 900};
+/* Lower case for the log lines, upper case for the screen. */
+static const char *act_label[ACT_COUNT] = {"System",    "Recovery",  "Fastboot",
+                                           "Download",  "Reboot",   "Power off"};
+static const char *act_label_up[ACT_COUNT] = {"SYSTEM",   "RECOVERY", "FASTBOOT",
+                                               "DOWNLOAD", "REBOOT",   "POWER OFF"};
+static const char *act_note[ACT_COUNT] = {"Starting Android...", "Restarting into recovery",
+                                          "Rebooting to bootloader", "Entering download mode",
+                                          "Restarting the device", "Shutting down"};
 
 static void enter_download_mode(void) {
     /* On this platform there is no known userspace trigger for the MTK download
@@ -1358,91 +1382,66 @@ static void perform(int idx, char **argv, char **envp) {
 /* ui                                                                  */
 /* ------------------------------------------------------------------ */
 
+/* The two screens below follow the design mockups: a near black sky with a
+ * large Jupiter on the right and a single column of options on the left, then
+ * a "starting X" screen while the chosen action runs. Every size is given in
+ * units of a 1080x2400 panel and scaled by L.k, so the layout follows the real
+ * framebuffer instead of being hard-coded to one panel. */
+
+struct lay {
+    float k;
+    int col_x, col_w;
+    int item_h, item_gap, menu_top;
+    int pcx, pcy, pr;
+    int dirty_w;
+};
+
+static struct lay L;
+
+static void layout_init(void) {
+    float kh = (float)G.h / 2400.0f;
+    float kw = (float)G.w / 1080.0f;
+    float k = kh < kw ? kh : kw;
+    if (k < 0.35f) k = 0.35f;
+    L.k = k;
+    L.col_x = (int)((float)G.w * 0.072f);
+    L.col_w = (int)((float)G.w * 0.40f);
+    L.item_h = (int)(86.0f * k);
+    if (L.item_h < 20) L.item_h = 20;
+    L.item_gap = (int)(11.0f * k);
+    L.menu_top = (int)((float)G.h * 0.155f);
+    L.pr = (int)((float)G.w * 0.34f);
+    L.pcx = (int)((float)G.w * 0.86f);
+    L.pcy = (int)((float)G.h * 0.55f);
+    /* Everything that moves lives inside the column, so only that strip has to
+     * be restored from the background and pushed to the framebuffer. It must
+     * also stop before the planet, otherwise the two would overlap. */
+    int dw = L.col_x + L.col_w + (int)(16.0f * k);
+    int planet_left = L.pcx - L.pr - 2;
+    if (dw > planet_left) dw = planet_left;
+    if (dw > (int)G.w) dw = (int)G.w;
+    if (dw < 1) dw = 1;
+    L.dirty_w = dw;
+}
+
 struct ui {
     int sel;
-    int hold_idx;
-    i64 hold_start;
+    int running;
     i64 t0;
+    i64 run_t;
     i64 countdown_ms;
     int countdown_on;
-    char status[160];
-    int busy;
 };
 
 static struct ui U;
 
 static i64 elapsed_ms(void) { return jbm_now_ms() - U.t0; }
 
-static float ui_scale(void) {
-    float kh = (float)G.h / 2400.0f;
-    float kw = (float)G.w / 1080.0f;
-    float k = kh < kw ? kh : kw;
-    if (k < 0.35f) k = 0.35f;
-    return k;
-}
-
-static void draw_bg(float k) {
-    u32 c1 = 0x0C111B, c2 = 0x05070C;
-    for (int y = 0; y < (int)G.h; y += 2) {
-        u32 t = (u32)((u32)y * 255u / (G.h > 1 ? G.h - 1 : 1));
-        fill_rect(0, y, (int)G.w, 2, mix(c1, c2, t) | 0xFF000000u);
-    }
-    int cx = (int)G.w / 2;
-    int cy = (int)((float)G.h * 0.16f);
-    int rad = (int)((float)G.w * 1.1f);
-    for (int i = 0; i < 26; i++) {
-        int rr = rad - i * (int)((float)G.w * 0.05f);
-        if (rr <= 0) break;
-        u32 a = (u32)(7 + i);
-        if (a > 40) a = 40;
-        ring(cx, cy, rr, (int)(k * 10.0f) + 4, (a << 24) | 0x6E86FF);
-    }
-}
-
-static void draw_icon(int kind, int cx, int cy, int r, u32 c) {
-    int t = r / 4 + 1;
-    switch (kind) {
-        case ACT_SYSTEM:
-            ring(cx, cy, r, t * 2, c);
-            tri(cx - r / 4, cy - r / 2, cx - r / 4, cy + r / 2, cx + r / 2, cy, c);
-            break;
-        case ACT_RECOVERY:
-            arc(cx, cy, r - t, t * 2, -70, 210, c);
-            tri(cx + r / 2, cy - r * 4 / 5, cx + r / 2, cy - r * 4 / 5 + r, cx + r * 5 / 4,
-                cy - r * 4 / 5 + r, c);
-            break;
-        case ACT_FASTBOOT:
-            quad(cx - r / 5, cy - r * 3 / 5, cx + r / 5, cy - r / 5, cx - r / 10, cy - r / 5,
-                 cx - r / 2, cy + r * 3 / 5, c);
-            quad(cx + r / 10, cy - r * 3 / 5, cx + r / 2, cy - r * 6 / 5, cx + r * 3 / 5,
-                 cy - r * 6 / 5, cx + r / 10, cy - r / 5, c);
-            break;
-        case ACT_DOWNLOAD:
-            fill_rect(cx - t, cy - r * 3 / 5, t * 2, r, c);
-            tri(cx - r / 2, cy - r / 5, cx - r / 2, cy + r / 5, cx, cy + r / 5 + r / 2, c);
-            tri(cx + r / 2, cy - r / 5, cx + r / 2, cy + r / 5, cx, cy + r / 5 + r / 2, c);
-            fill_rect(cx - r * 3 / 5, cy + r * 3 / 5, r * 6 / 5, t, c);
-            break;
-        case ACT_REBOOT:
-            arc(cx, cy, r - t, t * 2, 30, 320, c);
-            tri(cx - r * 5 / 4, cy - r / 2, cx - r * 5 / 4, cy + r / 3, cx - r / 2, cy - r / 8, c);
-            break;
-        default:
-            arc(cx, cy, r - t, t * 2, 120, 420, c);
-            fill_rect(cx - t, cy - r, t * 2, r + r / 2, c);
-            break;
-    }
-}
-
-static void card_geom(float k, int i, int *x, int *y, int *w, int *h) {
-    int pad = (int)((float)G.w * 0.052f);
-    *x = pad;
-    *w = (int)G.w - pad * 2;
-    *h = (int)((float)G.h * 0.093f);
-    int gap = (int)((float)G.h * 0.0085f);
-    int top = (int)((float)G.h * 0.142f);
-    *y = top + i * (*h + gap);
-    (void)k;
+static void item_geom(int i, int *x, int *y, int *w, int *h) {
+    *x = L.col_x;
+    *w = L.col_w;
+    *h = L.item_h;
+    *y = L.menu_top + i * (L.item_h + L.item_gap);
 }
 
 static i64 countdown_left(void) {
@@ -1452,174 +1451,361 @@ static i64 countdown_left(void) {
     return left < 0 ? 0 : left;
 }
 
-static void draw_ui(void) {
-    float k = ui_scale();
-    i64 now = jbm_now_ms();
-    i64 elapsed = now - U.t0;
+/* ------------------------------------------------------------------ */
+/* background: sky, stars and Jupiter (painted once)                    */
+/* ------------------------------------------------------------------ */
 
-    draw_bg(k);
+/* Band colours, dark belt to bright zone, sampled from the planet in the
+ * design. */
+static u32 PLR[256];
 
-    int pad = (int)((float)G.w * 0.052f);
-    i64 intro_el = elapsed_ms() < JBM_INTRO_MS ? elapsed_ms() : JBM_INTRO_MS;
-    int slide = (int)((JBM_INTRO_MS - intro_el) * 100 / JBM_INTRO_MS);
-    int ey = slide * (int)((float)G.h * 0.03f) / 100;
-
-    draw_text(&FN48, pad, (int)((float)G.h * 0.042f) + ey, 48.0f * k, RGBA(0xEAF0FAFF), "Boot Manager", TA_L | VA_M);
-    draw_text(&FN20, pad, (int)((float)G.h * 0.072f) + ey, 20.0f * k, RGBA(0x6E7C93FF), "CUSTOM BOOT MENU",
-              TA_L | VA_M);
-    draw_text(&FN20, (int)G.w - pad, (int)((float)G.h * 0.045f) + ey, 20.0f * k,
-              (act_color[U.sel] | 0xFF000000u), JBM_VERSION, TA_R | VA_M);
-
-    fill_rect(pad, (int)((float)G.h * 0.112f) + ey, (int)(3.0f * k) + 1, (int)((float)G.h * 0.018f),
-              RGBA(0x2A3446FF));
-
-    if (U.busy) {
-        for (int i = 0; i < ACT_COUNT; i++) {
-            int x, y, w, h;
-            card_geom(k, i, &x, &y, &w, &h);
-            i64 start = 60 + i * 55;
-            i64 a = elapsed - start;
-            if (a < 0) continue;
-            int alpha = (int)(255 * (a < 260 ? (a < 0 ? 0 : a) / 260.0f : 1.0f));
-            if (alpha < 0) alpha = 0;
-            if (alpha > 255) alpha = 255;
-            if (alpha < 6) continue;
-            int off = (int)((260 - a > 0 ? (260 - a) / 260.0f : 0.0f) * (float)G.w * 0.06f);
-            int sel = (i == U.sel);
-            u32 base = sel ? RGBA(0x19212FFFu) : RGBA(0x111823FFu);
-            round_rect(x + off, y, w, h, (int)((float)h * 0.22f), base);
-            round_rect_border(x + off, y, w, h, (int)((float)h * 0.22f), (int)(2.0f * k) + 1,
-                              (sel ? ((u32)act_color[i] | 0xFF000000u) : RGBA(0x232E3FFFu)));
-            if (sel) {
-                fill_rect(x + off, y + (int)((float)h * 0.22f) - (int)(10.0f * k), (int)(5.0f * k),
-                          h - (int)((float)h * 0.44f) + (int)(20.0f * k),
-                          (act_color[i] & 0xFFFFFF) | ((u32)alpha << 24));
-            }
-            int icy = y + h / 2;
-            int ir = (int)((float)h * 0.28f);
-            disc(x + off + (int)((float)h * 0.38f), icy, ir, (u32)((act_color[i] & 0xFFFFFF) | 0x24000000u));
-            draw_icon(i, x + off + (int)((float)h * 0.38f), icy, ir,
-                      (act_color[i] & 0xFFFFFF) | ((u32)alpha << 24));
-            draw_text(&FN32, x + off + (int)((float)h * 0.72f), icy - (int)(14.0f * k), 34.0f * k,
-                      0xEAF0FAu | ((u32)alpha << 24), act_label[i], TA_L | VA_B);
-            draw_text(&FN20, x + off + (int)((float)h * 0.72f), icy + (int)(12.0f * k), 20.0f * k,
-                      0x8A97ACu | ((u32)(alpha * 200 / 255) << 24), act_sub[i], TA_L | VA_T);
-            if (sel) {
-                int ax = x + off + w - (int)((float)h * 0.34f);
-                disc(ax, icy, (int)(9.0f * k) + 2, (act_color[i] & 0xFFFFFF) | ((u32)alpha << 24));
-                ring(ax, icy, (int)((float)h * 0.19f), (int)(3.0f * k) + 1,
-                     (act_color[i] & 0xFFFFFF) | 0x38000000u);
-            }
-        }
-
-        int fy = (int)((float)G.h * 0.80f);
-        draw_text(&FN32, pad, fy, 34.0f * k, RGBA(0xEAF0FAFF), U.status, TA_L | VA_M);
-        int bw = (int)G.w - pad * 2;
-        fill_rect(pad, fy + (int)((float)G.h * 0.024f), bw, (int)((float)G.h * 0.0042f) + 1, RGBA(0x1B2431FF));
-        int seg = bw / 5;
-        int phase = (int)((now / 80) % 5);
-        for (int i = 0; i < 5; i++)
-            fill_rect(pad + i * seg + seg / 5, fy + (int)((float)G.h * 0.024f), seg * 3 / 5,
-                      (int)((float)G.h * 0.0042f) + 1, i == phase ? (act_color[U.sel] | 0xFF000000u)
-                                                                  : RGBA(0x1B2431FF));
-        return;
+static void planet_ramp(void) {
+    static const u16 stop_pos[] = {0, 48, 92, 132, 168, 198, 226, 255};
+    static const u32 stop_col[] = {0x3B2822, 0x5A3A2B, 0x744D3A, 0x9A6B4B,
+                                   0xC08A62, 0xD2A27C, 0xE4C7A4, 0xF2E3CC};
+    for (int i = 0; i < 256; i++) {
+        int s = 0;
+        while (s < 6 && i > (int)stop_pos[s + 1]) s++;
+        u32 span = (u32)(stop_pos[s + 1] - stop_pos[s]);
+        u32 t = span ? (u32)(i - (int)stop_pos[s]) * 255u / span : 0;
+        PLR[i] = mix(stop_col[s], stop_col[s + 1], t);
     }
-
-    for (int i = 0; i < ACT_COUNT; i++) {
-        int x, y, w, h;
-        card_geom(k, i, &x, &y, &w, &h);
-        i64 start = 60 + i * 55;
-        i64 a = elapsed - start;
-        if (a < 0) continue;
-        int ease = a < 300 ? (int)(a / 300.0f * 255.0f) : 255;
-        if (ease < 0) ease = 0;
-        if (ease > 255) ease = 255;
-        int off = (int)((255 - ease) / 255.0f * (float)G.w * 0.08f);
-        int sel = (i == U.sel);
-        int radius = (int)((float)h * 0.22f);
-
-        int lift = sel ? (int)((float)G.h * 0.0018f) : 0;
-        int cy = y - lift;
-
-        u32 card = sel ? RGBA(0x18212FFFu) : RGBA(0x111823FFu);
-        round_rect(x + off, cy, w, h, radius, card);
-        round_rect_border(x + off, cy, w, h, radius, (int)(2.0f * k) + 1,
-                          sel ? ((act_color[i] & 0xFFFFFF) | 0xCD000000u) : RGBA(0x232E3FFFu));
-
-        if (sel) fill_rect(x + off, cy + radius - (int)(10.0f * k), (int)(5.0f * k),
-                           h - radius * 2 + (int)(20.0f * k), act_color[i] | 0xFF000000u);
-
-        int icy = cy + h / 2;
-        int icx = x + off + (int)((float)h * 0.38f);
-        int ir = (int)((float)h * 0.28f);
-        disc(icx, icy, ir, (act_color[i] & 0xFFFFFF) | 0x26000000u);
-        draw_icon(i, icx, icy, ir, act_color[i] | 0xFF000000u);
-
-        if (i == ACT_SYSTEM) {
-            i64 left = countdown_left();
-            i64 secs = (left + 999) / 1000;
-            char num[8];
-            num[0] = (char)('0' + (int)(secs / 10) % 10);
-            num[1] = (char)('0' + (int)(secs % 10));
-            num[2] = 0;
-            draw_text(&FDIG, (int)G.w - pad - (int)((float)G.w * 0.13f), icy, 132.0f * k,
-                      (act_color[i] & 0xFFFFFF) | (U.countdown_on ? 0xFF000000u : 0x60000000u), num,
-                      TA_R | VA_M);
-        }
-
-        draw_text(&FN32, x + off + (int)((float)h * 0.72f), icy - (int)(13.0f * k), 34.0f * k,
-                  RGBA(0xEAF0FAFF), act_label[i], TA_L | VA_B);
-        draw_text(&FN20, x + off + (int)((float)h * 0.72f), icy + (int)(13.0f * k), 20.0f * k,
-                  RGBA(0x8A97ACFF), act_sub[i], TA_L | VA_T);
-
-        if (sel) {
-            int ax = x + off + w - (int)((float)h * 0.34f);
-            int dot = (int)(9.0f * k) + 2;
-            int rr = (int)((float)h * 0.20f);
-            if (U.hold_idx == i) {
-                i64 held = now - U.hold_start;
-                i64 need = act_hold_ms[i] > 0 ? act_hold_ms[i] : 1;
-                int sweep = (int)((float)rr * (float)(held % 1200) / 1200.0f);
-                if (sweep < 1) sweep = 1;
-                ring(ax, icy, rr, (int)(4.0f * k) + 1, RGBA(0x1F6FEB4Fu));
-                ring(ax, icy, rr, (int)(4.0f * k) + 1, (act_color[i] & 0xFFFFFF) | 0xFF000000u);
-                arc(ax, icy, rr, (int)(5.0f * k) + 2, -90, -90 + (int)(360.0f * (float)held / (float)need),
-                    act_color[i] | 0xFF000000u);
-                (void)sweep;
-            } else {
-                ring(ax, icy, rr, (int)(3.0f * k) + 1, (act_color[i] & 0xFFFFFF) | 0x40000000u);
-            }
-            disc(ax, icy, dot, act_color[i] | 0xFF000000u);
-        }
-    }
-
-    int fy = (int)((float)G.h * 0.855f);
-    if (U.countdown_on) {
-        i64 left = countdown_left();
-        char lbl[160];
-        jbm_sn(lbl, "Auto-starting System in %llds", (long long)((left + 999) / 1000));
-        draw_text(&FN20, pad, fy, 20.0f * k, RGBA(0x6E7C93FF), lbl, TA_L | VA_M);
-        int bw = (int)G.w - pad * 2;
-        int by = (int)((float)G.h * 0.885f);
-        fill_rect(pad, by, bw, (int)((float)G.h * 0.0035f) + 1, RGBA(0x1B2431FF));
-        i64 total = U.countdown_ms > 0 ? U.countdown_ms : 1;
-        i64 prog = total - left;
-        if (prog < 0) prog = 0;
-        if (prog > total) prog = total;
-        fill_rect(pad, by, (int)((i64)bw * prog / total), (int)((float)G.h * 0.0035f) + 1, RGBA(0x34D399EB));
-    } else {
-        draw_text(&FN20, pad, fy, 20.0f * k, RGBA(0x6E7C93FF), "Auto-start cancelled - pick an option",
-                  TA_L | VA_M);
-    }
-    draw_text(&FN20, pad, (int)((float)G.h * 0.915f), 20.0f * k, RGBA(0x4E5A6EFF),
-              "Tap System to boot now. Hold Recovery, Download, Fastboot, Reboot or Power off.", TA_L | VA_M);
 }
 
-static int hit_card(int px, int py) {
-    float k = ui_scale();
+static float jbm_cosf(float a) { return jbm_sinf(a + 1.5707963268f); }
+
+static float jbm_sqrtf(float v) {
+    if (v <= 0.0f) return 0.0f;
+    float g = v * 0.5f + 1.0f;
+    for (int i = 0; i < 14; i++) g = 0.5f * (g + v / g);
+    return g;
+}
+
+static float smoothstepf(float e0, float e1, float x) {
+    float t = (x - e0) / (e1 - e0);
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    return t * t * (3.0f - 2.0f * t);
+}
+
+static float vhash(int x, int y) {
+    u32 n = (u32)x * 0x9E3779B1u + (u32)y * 0x85EBCA77u;
+    n ^= n >> 15;
+    n *= 0x2545F491u;
+    n ^= n >> 13;
+    return (float)(n >> 8) * (1.0f / 16777216.0f);
+}
+
+static float vnoise(float x, float y) {
+    int xi = (int)x, yi = (int)y;
+    float fx = x - (float)xi, fy = y - (float)yi;
+    fx = fx * fx * (3.0f - 2.0f * fx);
+    fy = fy * fy * (3.0f - 2.0f * fy);
+    float a = vhash(xi, yi), b = vhash(xi + 1, yi);
+    float c = vhash(xi, yi + 1), d = vhash(xi + 1, yi + 1);
+    float u = a + (b - a) * fx;
+    float v = c + (d - c) * fx;
+    return u + (v - u) * fy;
+}
+
+static u32 shade(u32 c, float f) {
+    u32 r = (u32)((float)((c >> 16) & 0xFF) * f);
+    u32 g = (u32)((float)((c >> 8) & 0xFF) * f);
+    u32 b = (u32)((float)(c & 0xFF) * f);
+    if (r > 255) r = 255;
+    if (g > 255) g = 255;
+    if (b > 255) b = 255;
+    return (r << 16) | (g << 8) | b;
+}
+
+/* Near black sky with a faint warm halo where the planet sits. */
+static void sky_render(void) {
+    float gr = (float)L.pr * 1.9f;
+    float gx = (float)L.pcx, gy = (float)L.pcy;
+    for (int y = 0; y < (int)G.h; y++) {
+        float dy = ((float)y - gy) / gr;
+        for (int x = 0; x < (int)G.w; x++) {
+            float dx = ((float)x - gx) / gr;
+            float f = 1.0f - jbm_sqrtf(dx * dx + dy * dy);
+            if (f <= 0.0f) {
+                store_px(x, y, 0xFF020202u);
+                continue;
+            }
+            store_px(x, y, 0xFF000000u | mix(0x020202, 0x643E23, (u32)(f * f * 140.0f)));
+        }
+    }
+}
+
+static void stars_render(void) {
+    u32 seed = 0x5EED1234u;
+    i64 n = ((i64)G.w * (i64)G.h) / 9000;
+    if (n > 420) n = 420;
+    for (i64 i = 0; i < n; i++) {
+        seed = seed * 1664525u + 1013904223u;
+        int x = (int)((seed >> 8) % (u32)G.w);
+        seed = seed * 1664525u + 1013904223u;
+        int y = (int)((seed >> 8) % (u32)G.h);
+        seed = seed * 1664525u + 1013904223u;
+        int b = (int)((seed >> 8) % 100u);
+        disc(x, y, b > 93 ? 2 : 1, (u32)(28 + (b % 6) * 24) << 24 | 0xFFFFFF);
+    }
+}
+
+/* Jupiter: wavy bands from a colour ramp, a red spot over them and a sphere
+ * lit from the upper left. */
+static void planet_render(void) {
+    int cx = L.pcx, cy = L.pcy, r = L.pr;
+    float inv = 1.0f / (float)r;
+    float sa = jbm_cosf(0.1745f), ss = jbm_sinf(0.1745f);
+    for (int y = cy - r; y <= cy + r; y++) {
+        if (y < 0 || y >= (int)G.h) continue;
+        float ny = ((float)y - (float)cy) * inv;
+        for (int x = cx - r; x <= cx + r; x++) {
+            if (x < 0 || x >= (int)G.w) continue;
+            float nx = ((float)x - (float)cx) * inv;
+            float d2 = nx * nx + ny * ny;
+            if (d2 > 1.0f) continue;
+            float nz = jbm_sqrtf(1.0f - d2);
+
+            float t1 = vnoise((float)x * 0.020f, (float)y * 0.055f);
+            float t2 = vnoise((float)x * 0.075f, (float)y * 0.160f);
+            float lat = ny + 0.085f * (t1 - 0.5f) + 0.030f * (t2 - 0.5f);
+            float p = 0.50f + 0.30f * jbm_sinf(lat * 4.3f + 0.6f) +
+                      0.155f * jbm_sinf(lat * 9.1f + 2.1f) +
+                      0.080f * jbm_sinf(lat * 17.3f + 0.4f) +
+                      0.045f * jbm_sinf(lat * 29.0f + 1.3f) +
+                      0.022f * jbm_sinf(lat * 47.0f + 2.7f);
+            if (p < 0.0f) p = 0.0f;
+            if (p > 1.0f) p = 1.0f;
+            u32 col = PLR[(int)(p * 255.0f)];
+
+            float sx = nx - 0.26f, sy = ny - 0.17f;
+            float u = (sx * sa + sy * ss) / 0.21f;
+            float v = (-sx * ss + sy * sa) / 0.123f;
+            float sd = jbm_sqrtf(u * u + v * v) + 0.16f * (t2 - 0.5f);
+            if (sd < 1.45f) {
+                u32 sc = mix(0x8C4830, 0x4B2118, (u32)((1.0f - smoothstepf(0.0f, 0.52f, sd)) * 255.0f));
+                col = mix(col, sc, (u32)((1.0f - smoothstepf(0.55f, 1.42f, sd)) * 235.0f));
+            }
+
+            float diff = nx * -0.40f + ny * -0.46f + nz * 0.79f;
+            if (diff < 0.0f) diff = 0.0f;
+            u32 rgb = shade(col, 0.11f + 0.92f * diff);
+            if (d2 > 0.90f && diff > 0.04f)
+                rgb = mix(rgb, 0xE8C29A, (u32)(((d2 - 0.90f) / 0.10f) * diff * 140.0f));
+            store_px(x, y, 0xFF000000u | rgb);
+        }
+    }
+}
+
+static void bg_build(void) {
+    if (!G.ok || !G.cv || !G.bg) return;
+    planet_ramp();
+    sky_render();
+    stars_render();
+    planet_render();
+    memcpy(G.bg, G.cv, G.stride * (u32)G.h);
+}
+
+/* Puts the static background back under the part of the canvas the menus
+ * overdraw. */
+static void restore_bg(void) {
+    if (!G.bg) return;
+    u32 bpr = G.w * (G.bpp / 8);
+    u32 d = (u32)L.dirty_w * (G.bpp / 8);
+    if (d > bpr) d = bpr;
+    for (u32 y = 0; y < G.h; y++)
+        memcpy(G.cv + (u32)y * G.stride, G.bg + (u32)y * G.stride, d);
+}
+
+/* ------------------------------------------------------------------ */
+/* widgets                                                             */
+/* ------------------------------------------------------------------ */
+
+/* Rounded rectangle filled with a horizontal alpha ramp. */
+static void round_rect_grad(int x, int y, int w, int h, int r, u32 rgb, int a0, int a1) {
+    if (w <= 0 || h <= 0) return;
+    if (r > w / 2) r = w / 2;
+    if (r > h / 2) r = h / 2;
+    if (r < 0) r = 0;
+    rgb &= 0xFFFFFF;
+    for (int row = 0; row < h; row++) {
+        int e = row < h - 1 - row ? row : h - 1 - row;
+        int in = (r > 0 && e < r) ? rr_inset(r, e) : 0;
+        int x0 = x + in, x1 = x + w - in;
+        int span = x1 - x0 - 1;
+        if (span <= 0) continue;
+        for (int cx = x0; cx < x1; cx++) {
+            int a = a0 + (a1 - a0) * (cx - x0) / span;
+            if (a > 0) blend(cx, y + row, ((u32)a << 24) | rgb);
+        }
+    }
+}
+
+/* Tilted ellipse outline, used for the ring around the brand mark. */
+static void ellipse_ring(int cx, int cy, int rx, int ry, int th, float ang, u32 c) {
+    if (rx <= 0 || ry <= 0 || th <= 0) return;
+    float ca = jbm_cosf(ang), sa = jbm_sinf(ang);
+    float minr = rx < ry ? (float)rx : (float)ry;
+    int ext = (rx > ry ? rx : ry) + th;
+    for (int y = cy - ext; y <= cy + ext; y++) {
+        for (int x = cx - ext; x <= cx + ext; x++) {
+            float dx = (float)x - (float)cx, dy = (float)y - (float)cy;
+            float u = (dx * ca + dy * sa) / (float)rx;
+            float v = (-dx * sa + dy * ca) / (float)ry;
+            float d = (jbm_sqrtf(u * u + v * v) - 1.0f) * minr;
+            if (d < 0.0f) d = -d;
+            if (d <= (float)th * 0.5f) blend(x, y, c);
+        }
+    }
+}
+
+/* The planet mark next to the wordmark. Returns the x the word starts at. */
+static int draw_brand(int cx, int cy, int r, float name_px, u32 icon_c, u32 accent, int dot) {
+    int th = (int)((float)r * 0.11f) + 1;
+    ring(cx, cy, r, th, icon_c);
+    ellipse_ring(cx, cy, (int)((float)r * 1.16f), (int)((float)r * 0.32f), th, -0.3142f, icon_c);
+    if (dot)
+        disc(cx + r + (int)((float)r * 0.12f), cy - r + (int)((float)r * 0.22f),
+             (int)((float)r * 0.14f) + 1, icon_c);
+    int tx = cx + r + (int)((float)r * 0.42f);
+    draw_pair(&FN32, tx, cy, name_px, TA_L | VA_M, (int)(name_px * 0.04f), RGBA(0xEEEEEEFF), "Jupiter",
+              accent, "Boot");
+    return tx;
+}
+
+/* ------------------------------------------------------------------ */
+/* screen 1: the option list                                           */
+/* ------------------------------------------------------------------ */
+
+static void draw_menu(void) {
+    float k = L.k;
+    i64 el = elapsed_ms();
+    /* Entry animation: the column slides up and fades in, item by item. */
+    int left = el < JBM_INTRO_MS ? JBM_INTRO_MS - (int)el : 0;
+    int ey = left * (int)((float)G.h * 0.012f) / JBM_INTRO_MS;
+
+    int br = (int)(28.0f * k);
+    int top = (int)((float)G.h * 0.075f);
+    int tx = draw_brand(L.col_x + br, top + br + ey, br, 44.0f * k, RGBA(0xBD7946FF),
+                        RGBA(0xC47B48FF), 0);
+    char dev[40];
+    jbm_sn(dev, "JBM v%s", JBM_VERSION);
+    draw_text_ls(&FN20, tx, top + (int)(84.0f * k) + ey, 24.0f * k, RGBA(0x777777FF), dev, TA_L | VA_M,
+                 (int)(4.0f * k));
+
     for (int i = 0; i < ACT_COUNT; i++) {
         int x, y, w, h;
-        card_geom(k, i, &x, &y, &w, &h);
+        item_geom(i, &x, &y, &w, &h);
+        y += ey;
+        i64 start = 40 + i * 40;
+        i64 a = el - start;
+        if (a < 0) continue;
+        int al = (int)(a < 320 ? (float)a * 255.0f / 320.0f : 255.0f);
+        x += (255 - al) * (int)((float)G.w * 0.05f) / 255;
+        int sel = (i == U.sel);
+        int r = (int)(6.0f * k) + 1;
+
+        if (sel) {
+            round_rect_grad(x, y, w, h, r, 0xB86837, 56, 6);
+            round_rect_border(x, y, w, h, r, (int)(1.0f * k) + 1, RGBA(0xD88A4E40));
+            int lw = (int)(2.0f * k) + 1;
+            round_rect(x, y, lw, h, r, RGBA(0xD88A4EFF));
+            int bar = (int)(2.0f * k) + 1;
+            int inset = (int)(9.0f * k);
+            fill_rect(x - bar * 3, y + inset, bar * 3, h - inset * 2, RGBA(0xDF925530));
+            fill_rect(x - bar, y + inset, bar, h - inset * 2, RGBA(0xDF9255FF));
+        }
+
+        u32 fg = sel ? RGBA(0xFFFFFFFF) : RGBA(0x858585FF);
+        fg = (fg & 0x00FFFFFFu) | ((u32)al << 24);
+        draw_text_ls(&FN32, x + (int)((float)w * 0.115f), y + h / 2, 33.0f * k, fg, act_label_up[i],
+                     TA_L | VA_M, (int)(4.0f * k));
+    }
+
+    int menu_bottom = L.menu_top + ACT_COUNT * (L.item_h + L.item_gap) - L.item_gap;
+    int fy = menu_bottom + (int)(38.0f * k) + ey;
+    char foot[64];
+    jbm_sn(foot, "TOUCH TO SELECT \xB7 %s", act_label_up[U.sel]);
+    draw_text_ls(&FN20, L.col_x, fy, 22.0f * k, RGBA(0x4E4E4EFF), foot, TA_L | VA_M, (int)(3.0f * k));
+
+    if (U.countdown_on) {
+        i64 left_s = countdown_left();
+        i64 secs = (left_s + 999) / 1000;
+        char num[8];
+        num[0] = (char)('0' + (int)(secs / 10) % 10);
+        num[1] = (char)('0' + (int)secs % 10);
+        num[2] = 0;
+        int cy = fy + (int)(66.0f * k);
+        draw_text_ls(&FN20, L.col_x, cy, 20.0f * k, RGBA(0x3C3C3CFF), "AUTO-BOOT IN", TA_L | VA_T,
+                     (int)(3.0f * k));
+        draw_text(&FDIG, L.col_x, cy + (int)(44.0f * k), 96.0f * k, RGBA(0xC47B4880), num, TA_L | VA_T);
+        int by = cy + (int)(176.0f * k);
+        int th = (int)(3.0f * k) + 1;
+        fill_rect(L.col_x, by, L.col_w, th, RGBA(0x141414FF));
+        i64 total = U.countdown_ms > 0 ? U.countdown_ms : 1;
+        i64 prog = total - left_s;
+        if (prog < 0) prog = 0;
+        if (prog > total) prog = total;
+        fill_rect(L.col_x, by, (int)((i64)L.col_w * prog / total), th, RGBA(0xC47B4866));
+    } else {
+        draw_text_ls(&FN20, L.col_x, fy + (int)(66.0f * k), 20.0f * k, RGBA(0x3C3C3CFF),
+                     "AUTO-BOOT CANCELLED", TA_L | VA_T, (int)(3.0f * k));
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* screen 2: the chosen action starting                                */
+/* ------------------------------------------------------------------ */
+
+static void draw_running(int idx) {
+    float k = L.k;
+    int br = (int)(32.0f * k);
+    int top = (int)((float)G.h * 0.075f);
+    int tx = draw_brand(L.col_x + br, top + br, br, 46.0f * k, RGBA(0xC87335FF), RGBA(0xC87335FF), 1);
+    char dev[40];
+    jbm_sn(dev, "JBM v%s", JBM_VERSION);
+    draw_text_ls(&FN20, tx, top + (int)(96.0f * k), 26.0f * k, RGBA(0x999999FF), dev, TA_L | VA_M,
+                 (int)(5.0f * k));
+
+    int y = (int)((float)G.h * 0.285f);
+    draw_text_ls(&FN32, L.col_x, y, 26.0f * k, RGBA(0xDDDDDDFF), "STARTING", TA_L | VA_T,
+                 (int)(10.0f * k));
+    y += (int)(58.0f * k);
+    draw_text_ls(&FN48, L.col_x, y, 104.0f * k, RGBA(0xC87335FF), act_label_up[idx], TA_L | VA_T,
+                 (int)(18.0f * k));
+    y += (int)(158.0f * k);
+    draw_text_ls(&FN32, L.col_x, y, 34.0f * k, RGBA(0xDDDDDDFF), act_note[idx], TA_L | VA_T,
+                 (int)(7.0f * k));
+
+    /* Spinner: a dim full circle with a bright half sweeping clockwise. */
+    int sr = (int)(36.0f * k);
+    int th = (int)(6.0f * k) + 1;
+    int scx = L.col_x + sr, scy = y + (int)(104.0f * k);
+    ring(scx, scy, sr, th, RGBA(0xFFFFFF1A));
+    int ang = -(int)((jbm_now_ms() % 1150) * 360 / 1150);
+    arc(scx, scy, sr, th + (int)(2.0f * k), ang, ang + 180, RGBA(0xC87335FF));
+
+    int fy = (int)((float)G.h * 0.925f);
+    int ls = (int)(6.0f * k);
+    draw_text_ls(&FN20, L.col_x, fy, 24.0f * k, RGBA(0x8B542FFF), "JUPITERBOOT", TA_L | VA_M, ls);
+    char foot[64];
+    jbm_sn(foot, " \xB7 %s", act_label_up[idx]);
+    draw_text_ls(&FN20, L.col_x + measure_ls(&FN20, "JUPITERBOOT", 24.0f * k, ls), fy, 24.0f * k,
+                 RGBA(0x666666FF), foot, TA_L | VA_M, ls);
+}
+
+static void draw_ui(void) {
+    if (!G.ok) return;
+    restore_bg();
+    if (U.running >= 0) draw_running(U.running);
+    else draw_menu();
+}
+
+static int hit_item(int px, int py) {
+    for (int i = 0; i < ACT_COUNT; i++) {
+        int x, y, w, h;
+        item_geom(i, &x, &y, &w, &h);
         if (px >= x && px < x + w && py >= y && py < y + h) return i;
     }
     return -1;
@@ -1627,7 +1813,18 @@ static int hit_card(int px, int py) {
 
 static void present(void) {
     if (!G.ok) return;
-    memcpy(G.mem, G.cv, G.stride * G.h);
+    u32 bpr = G.w * (G.bpp / 8);
+    u32 d = (u32)L.dirty_w * (G.bpp / 8);
+    if (d > bpr) d = bpr;
+    for (u32 y = 0; y < G.h; y++)
+        memcpy(G.mem + (u32)y * G.stride, G.cv + (u32)y * G.stride, d);
+}
+
+/* First frame goes out whole, so the frozen boot logo under the planet is
+ * replaced too. */
+static void present_full(void) {
+    if (!G.ok) return;
+    memcpy(G.mem, G.cv, G.stride * (u32)G.h);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1645,6 +1842,10 @@ static void cleanup_and_chain(char **argv, char **envp, const char *why) {
     if (G.cv) {
         sc2(SYS_munmap, (long)G.cv, G.stride * (u32)G.h);
         G.cv = 0;
+    }
+    if (G.bg) {
+        sc2(SYS_munmap, (long)G.bg, G.stride * (u32)G.h);
+        G.bg = 0;
     }
 #endif
     /* Close the menu's fds so they do not leak into /init.system and so
@@ -1701,9 +1902,19 @@ static void dev_init(void) {
 #ifdef JBM_HOST
 /* Host preview: renders the real draw_ui() path into an off-screen ARGB8888
  * canvas and writes a binary PPM, so layout and colours can be checked without
- * a device. Usage: jbm_host [out.ppm] [at_ms_into_countdown]
+ * a device. Usage: jbm_host <out.ppm> [at_ms] [menu|system|recovery|fastboot|download|reboot|"power off"]
  */
-static void host_preview(const char *path, i64 at_ms) {
+static int jbm_str_ieq(const char *a, const char *b) {
+    for (; *a && *b; a++, b++) {
+        char x = *a, y = *b;
+        if (x >= 'A' && x <= 'Z') x = (char)(x + 32);
+        if (y >= 'A' && y <= 'Z') y = (char)(y + 32);
+        if (x != y) return 0;
+    }
+    return *a == *b;
+}
+
+static void host_preview(const char *path, i64 at_ms, int running) {
     G.w = 1080;
     G.h = 2400;
     G.bpp = 32;
@@ -1715,15 +1926,20 @@ static void host_preview(const char *path, i64 at_ms) {
     G.bo = 0;
     G.to = 24;
     G.cv = (u8 *)calloc(1, G.len);
+    G.bg = (u8 *)calloc(1, G.len);
     G.mem = (u8 *)calloc(1, G.len);
-    if (!G.cv || !G.mem) {
+    if (!G.cv || !G.mem || !G.bg) {
         fprintf(stderr, "[jbm:host] out of memory\n");
         exit(1);
     }
     G.ok = 1;
 
-    U.sel = ACT_SYSTEM;
-    U.hold_idx = -1;
+    layout_init();
+    bg_build();
+
+    U.sel = running >= 0 ? running : ACT_SYSTEM;
+    U.running = running;
+    U.run_t = jbm_now_ms();
     U.t0 = jbm_now_ms() - at_ms;
     U.countdown_ms = JBM_AUTOBOOT_SEC * 1000;
     U.countdown_on = JBM_AUTOBOOT_SEC > 0;
@@ -1745,8 +1961,8 @@ static void host_preview(const char *path, i64 at_ms) {
         }
     }
     fclose(f);
-    fprintf(stderr, "[jbm:host] wrote %s (%ux%u, countdown %llds left)\n", path, G.w, G.h,
-            (long long)((countdown_left() + 999) / 1000));
+    fprintf(stderr, "[jbm:host] wrote %s (%ux%u, %s, countdown %llds left)\n", path, G.w, G.h,
+            running >= 0 ? act_label[running] : "menu", (long long)((countdown_left() + 999) / 1000));
 }
 
 int main(int argc, char **argv) {
@@ -1754,12 +1970,21 @@ int main(int argc, char **argv) {
     dev_init();
     if (argc >= 2) {
         i64 at_ms = argc >= 3 ? (i64)atoi(argv[2]) : 0;
-        host_preview(argv[1], at_ms);
+        const char *screen = argc >= 4 ? argv[3] : "menu";
+        int running = -1;
+        for (int i = 0; i < ACT_COUNT; i++)
+            if (jbm_str_ieq(screen, act_label[i]) || jbm_str_ieq(screen, act_label_up[i])) {
+                running = i;
+                break;
+            }
+        host_preview(argv[1], at_ms, running);
         return 0;
     }
     touch_open();
     fprintf(stderr, "[jbm:host] gfx_ok=%d touch_fd=%d\n", G.ok, T.fd);
-    fprintf(stderr, "[jbm:host] usage: %s out.ppm [at_ms]\n", argv[0]);
+    fprintf(stderr,
+            "[jbm:host] usage: %s out.ppm [at_ms] [menu|system|recovery|fastboot|download|reboot|poweroff]\n",
+            argv[0]);
     return 0;
 }
 #endif
@@ -1802,8 +2027,11 @@ int jbm_main(int argc, char **argv, char **envp) {
 
     touch_open();
 
+    layout_init();
+    bg_build();
+
     U.sel = ACT_SYSTEM;
-    U.hold_idx = -1;
+    U.running = -1;
     U.t0 = jbm_now_ms();
     U.countdown_ms = JBM_AUTOBOOT_SEC * 1000;
     U.countdown_on = JBM_AUTOBOOT_SEC > 0;
@@ -1812,68 +2040,58 @@ int jbm_main(int argc, char **argv, char **envp) {
     i64 last_draw = 0;
     int kicked = 0;
     i64 kick_t = 0;
+    int first = 1;
 
     for (;;) {
         i64 now = jbm_now_ms();
         touch_poll();
 
+        /* Any touch stops the auto-start: the device waits for a decision. */
         if (T.pressed) {
             U.countdown_on = 0;
-            int idx = hit_card(T.sx, T.sy);
-            if (idx >= 0) {
-                U.sel = idx;
-                U.hold_idx = (act_hold_ms[idx] > 0) ? idx : -1;
-                if (U.hold_idx >= 0) U.hold_start = now;
-            }
+            int idx = hit_item(T.sx, T.sy);
+            if (idx >= 0) U.sel = idx;
         }
 
-        if (U.hold_idx >= 0) {
-            int idx = hit_card(T.sx, T.sy);
-            if (idx != U.hold_idx) {
-                U.hold_idx = -1;
-            } else if (now - U.hold_start >= act_hold_ms[U.hold_idx]) {
-                int go = U.hold_idx;
-                U.hold_idx = -1;
-                U.busy = 1;
-                jbm_sn(U.status, "Starting %s...", act_label[go]);
-                for (int f = 0; f < 3; f++) {
-                    draw_ui();
-                    present();
-                    jbm_sleep_ms(70);
-                }
-                jbm_log("jbm: action %s confirmed", act_label[go]);
-                perform(go, argv, envp);
-            }
-        }
-
+        /* One tap is enough for every mode, System included. */
         if (T.released) {
-            int idx = hit_card(T.tap_x, T.tap_y);
-            if (idx >= 0 && act_hold_ms[idx] == 0 && U.hold_idx < 0) {
+            U.countdown_on = 0;
+            int idx = hit_item(T.tap_x, T.tap_y);
+            if (idx >= 0 && U.running < 0) {
                 U.sel = idx;
-                U.busy = 1;
-                jbm_sn(U.status, "Starting %s...", act_label[idx]);
-                for (int f = 0; f < 3; f++) {
-                    draw_ui();
-                    present();
-                    jbm_sleep_ms(70);
-                }
+                U.running = idx;
+                U.run_t = now;
                 jbm_log("jbm: action %s tapped", act_label[idx]);
-                perform(idx, argv, envp);
             }
-            U.hold_idx = -1;
         }
 
-        if (U.countdown_on && elapsed_ms() >= JBM_INTRO_MS && countdown_left() <= 0) {
-            cleanup_and_chain(argv, envp, "countdown elapsed");
+        /* The "starting X" screen stays up long enough to be seen. */
+        if (U.running >= 0 && now - U.run_t >= JBM_RUN_MS) {
+            int go = U.running;
+            U.running = -1;
+            perform(go, argv, envp);
         }
 
-        if (now - start > (i64)JBM_TOTAL_TIMEOUT_SEC * 1000) {
+        if (U.running < 0 && U.countdown_on && elapsed_ms() >= JBM_INTRO_MS &&
+            countdown_left() <= 0) {
+            U.sel = ACT_SYSTEM;
+            U.running = ACT_SYSTEM;
+            U.run_t = now;
+            jbm_log("jbm: countdown elapsed, starting System");
+        }
+
+        if (U.running < 0 && now - start > (i64)JBM_TOTAL_TIMEOUT_SEC * 1000) {
             cleanup_and_chain(argv, envp, "safety timeout");
         }
 
         if (now - last_draw > 33) {
             draw_ui();
-            present();
+            if (first) {
+                first = 0;
+                present_full();
+            } else {
+                present();
+            }
             last_draw = now;
             /* Two kicks: right after the first frame (so the layer is
              * reprogrammed with the menu already in memory) and once more
@@ -1882,9 +2100,11 @@ int jbm_main(int argc, char **argv, char **envp) {
                 kicked = 1;
                 kick_t = now;
                 gfx_kick();
+                first = 1; /* the kick can blank the panel: repaint it all */
             } else if (kicked == 1 && now - kick_t > 1500) {
                 kicked = 2;
                 gfx_kick();
+                first = 1;
             }
         } else {
             jbm_sleep_ms(8);
