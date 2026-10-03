@@ -6,6 +6,8 @@
 #include <stdint.h>
 
 #include "jbm_font.h"
+#include "jbm_planet_boot.h"
+#include "jbm_planet_menu.h"
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -37,6 +39,15 @@ struct jbm_timespec {
 
 /* Duration of the entry slide-in animation, in ms. */
 #define JBM_INTRO_MS 480
+
+/* How long the "Booting System" screen stays before chaining to the real
+ * init. The frame is left in the framebuffer while Android boots. */
+#define JBM_BOOT_MS 2000
+
+/* How long the action screen stays up before a non-System action actually runs
+ * (reboot to recovery/bootloader, restart, power off, ...). Without this the
+ * reboot syscall fires in the same frame as the tap and nothing is seen. */
+#define JBM_ACTION_MS 1500
 
 /* errno of the last failed jbm_mmap(), 0 otherwise (diagnostics only). */
 static int jbm_mmap_err = 0;
@@ -761,6 +772,22 @@ static int gfx_open(void) {
  * to pick up the new contents. Verified on this device: FBIOPUT_VSCREENINFO with
  * FB_ACTIVATE_FORCE is what makes fb0 visible (without it the boot logo stays
  * frozen on screen while the menu draws into memory nobody reads). */
+
+/* Cheap re-apply: one ioctl pair, no blank/unblank and no sleep. Every screen
+ * change has to go through this, otherwise a memcpy into the scanout buffer can
+ * stay invisible and the panel keeps showing the previous screen forever. */
+static void gfx_reapply(void) {
+    if (!G.ok) return;
+    struct jbm_fb_var var;
+    memset(&var, 0, sizeof(var));
+    i64 g = jbm_ioctl(G.fd, FBIOGET_VSCREENINFO, &var);
+    var.activate = FB_ACTIVATE_FORCE | FB_ACTIVATE_ALL;
+    i64 p = jbm_ioctl(G.fd, FBIOPUT_VSCREENINFO, &var);
+    static int n = 0;
+    if (++n <= 4 || (n % 60) == 0)
+        jbm_log("jbm: reapply #%d get=%d put=%d", n, (int)g, (int)p);
+}
+
 static void gfx_kick(void) {
     if (!G.ok) return;
     struct jbm_fb_var var;
@@ -772,13 +799,6 @@ static void gfx_kick(void) {
     jbm_sleep_ms(250);
     i64 b0 = jbm_ioctl(G.fd, FBIOBLANK, (void *)0);
     jbm_log("jbm: gfx kick get=%d put=%d blank1=%d blank0=%d", (int)g, (int)p, (int)b1, (int)b0);
-}
-
-static u32 mix(u32 c1, u32 c2, u32 t) {
-    u32 r = (((c1 >> 16) & 0xFF) * (255 - t) + ((c2 >> 16) & 0xFF) * t) / 255;
-    u32 g = (((c1 >> 8) & 0xFF) * (255 - t) + ((c2 >> 8) & 0xFF) * t) / 255;
-    u32 b = ((c1 & 0xFF) * (255 - t) + (c2 & 0xFF) * t) / 255;
-    return (r << 16) | (g << 8) | b;
 }
 
 /* Drawing colours are ARGB (0xAARRGGBB); these literals are written RGBA
@@ -861,18 +881,6 @@ static int rr_inset(int r, int row) {
     return inset < 0 ? 0 : inset;
 }
 
-static void round_rect(int x, int y, int w, int h, int r, u32 argb) {
-    if (w <= 0 || h <= 0) return;
-    if (r > w / 2) r = w / 2;
-    if (r > h / 2) r = h / 2;
-    if (r < 0) r = 0;
-    for (int row = 0; row < h; row++) {
-        int e = row < h - 1 - row ? row : h - 1 - row;
-        int in = (r > 0 && e < r) ? rr_inset(r, e) : 0;
-        fill_rect(x + in, y + row, w - 2 * in, 1, argb);
-    }
-}
-
 static void round_rect_border(int x, int y, int w, int h, int r, int th, u32 argb) {
     if (w <= 0 || h <= 0 || th <= 0) return;
     if (r > w / 2) r = w / 2;
@@ -939,36 +947,6 @@ static void arc(int cx, int cy, int r, int th, int a0, int a1, u32 c) {
     }
 }
 
-static void tri(int x1, int y1, int x2, int y2, int x3, int y3, u32 c) {
-    int xs[3], ys[3];
-    xs[0] = x1;
-    xs[1] = x2;
-    xs[2] = x3;
-    ys[0] = y1;
-    ys[1] = y2;
-    ys[2] = y3;
-    int ymin = y1 < y2 ? y1 : y2, ymax = y1 > y2 ? y1 : y2;
-    if (y3 < ymin) ymin = y3;
-    if (y3 > ymax) ymax = y3;
-    for (int y = ymin; y <= ymax; y++) {
-        int lo = 0x7FFFFFFF, hi = -0x7FFFFFFF;
-        for (int e = 0; e < 3; e++) {
-            int ax = xs[e], ay = ys[e], bx = xs[(e + 1) % 3], by = ys[(e + 1) % 3];
-            if (ay == by) continue;
-            if (!((y >= ay && y < by) || (y >= by && y < ay))) continue;
-            int x = ax + (int)((i64)(bx - ax) * (y - ay) / (by - ay));
-            if (x < lo) lo = x;
-            if (x > hi) hi = x;
-        }
-        if (hi >= lo) fill_rect(lo, y, hi - lo + 1, 1, c);
-    }
-}
-
-static void quad(int x1, int y1, int x2, int y2, int x3, int y3, int x4, int y4, u32 c) {
-    tri(x1, y1, x2, y2, x3, y3, c);
-    tri(x1, y1, x3, y3, x4, y4, c);
-}
-
 /* ------------------------------------------------------------------ */
 /* text                                                                */
 /* ------------------------------------------------------------------ */
@@ -985,8 +963,6 @@ static struct font FN32 = {F34_data, F34_meta, F34_ATLAS_W, F34_ATLAS_H, F34_PX,
                            F34_TOP,   F34_BOT,   F34_FIRST, F34_COUNT};
 static struct font FN48 = {F48_data, F48_meta, F48_ATLAS_W, F48_ATLAS_H, F48_PX,
                            F48_TOP,   F48_BOT,   F48_FIRST, F48_COUNT};
-static struct font FDIG = {FDIG_data, FDIG_meta, FDIG_ATLAS_W, FDIG_ATLAS_H, FDIG_PX,
-                           FDIG_TOP,  FDIG_BOT,  FDIG_FIRST, FDIG_COUNT};
 
 #define TA_L 0
 #define TA_C 1
@@ -999,25 +975,31 @@ static float glyph_adv(struct font *f, int idx, float k) { return (float)f->meta
 
 static float scale_of(struct font *f, float px) { return px / (float)f->px; }
 
-static int measure(struct font *f, const char *s, float px) {
+/* Must mirror draw_text_ls() exactly (per-glyph rounding, ls between chars),
+ * otherwise sequential layouts drift from the drawn ink. */
+static int measure(struct font *f, const char *s, float px, int ls) {
     float k = scale_of(f, px);
-    float w = 0;
+    int w = 0;
+    int n = 0;
     for (const char *p = s; *p; p++) {
         int i = (int)(u8)*p - f->first;
+        n++;
         if (i < 0 || i >= f->count) continue;
-        w += glyph_adv(f, i, k);
+        w += (int)(glyph_adv(f, i, k) + 0.5f);
     }
-    return (int)(w + 0.5f);
+    if (n > 1) w += ls * (n - 1);
+    return w;
 }
 
 static int line_h(float px) { return (int)(px * 1.32f + 0.5f); }
 
-static void draw_text(struct font *f, int x, int y, float px, u32 argb, const char *s, int align) {
+static void draw_text_ls(struct font *f, int x, int y, float px, int ls, u32 argb, const char *s,
+                         int align) {
     if (!f->count) return;
     float k = scale_of(f, px);
     int lh = line_h(px);
-    if (align & TA_C) x -= measure(f, s, px) / 2;
-    else if (align & TA_R) x -= measure(f, s, px);
+    if (align & TA_C) x -= measure(f, s, px, ls) / 2;
+    else if (align & TA_R) x -= measure(f, s, px, ls);
     if (align & VA_M) y -= lh / 2;
     else if (align & VA_B) y -= lh;
 
@@ -1062,8 +1044,18 @@ static void draw_text(struct font *f, int x, int y, float px, u32 argb, const ch
                 }
             }
         }
-        x += (int)(glyph_adv(f, idx, k) + 0.5f);
+        x += (int)(glyph_adv(f, idx, k) + 0.5f) + ls;
     }
+}
+
+/* Uppercases src into dst (dst must hold strlen+1); the font faces are ASCII. */
+static void up_str(char *dst, const char *src, int n) {
+    int i = 0;
+    for (; src[i] && i < n - 1; i++) {
+        char c = src[i];
+        dst[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+    }
+    dst[i] = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1303,12 +1295,6 @@ enum { ACT_SYSTEM, ACT_RECOVERY, ACT_FASTBOOT, ACT_DOWNLOAD, ACT_REBOOT, ACT_POW
 
 static const char *act_label[ACT_COUNT] = {"System",      "Recovery",   "Fastboot",
                                            "Download",    "Reboot",     "Power off"};
-static const char *act_sub[ACT_COUNT] = {"Boot installed Android", "Reboot to recovery",
-                                         "Reboot to bootloader",   "Enter download / ODIN mode",
-                                         "Restart the device",     "Shut the device down"};
-static const u32 act_color[ACT_COUNT] = {0x34D399, 0x60A5FA, 0xFBBF24,
-                                         0xA78BFA, 0x22D3EE, 0xF87171};
-static const int act_hold_ms[ACT_COUNT] = {0, 900, 700, 900, 700, 900};
 
 static void enter_download_mode(void) {
     /* On this platform there is no known userspace trigger for the MTK download
@@ -1360,269 +1346,378 @@ static void perform(int idx, char **argv, char **envp) {
 
 struct ui {
     int sel;
-    int hold_idx;
-    i64 hold_start;
+    int mode;      /* UI_MENU draws the menu, UI_BOOT/UI_BUSY the action screen */
+    int act;       /* which action the action screen is announcing */
+    i64 boot_t0;
     i64 t0;
     i64 countdown_ms;
     int countdown_on;
-    char status[160];
-    int busy;
 };
 
 static struct ui U;
 
+#define UI_MENU 0
+#define UI_BOOT 1
+#define UI_BUSY 2
+
+/* Set whenever the screen changed wholesale, so the next loop iteration draws
+ * it immediately instead of waiting for the next 33 ms frame slot. */
+static int ui_dirty = 1;
+
+#define BG_MENU 0
+#define BG_BOOT 1
+
+static void present(void);
+
 static i64 elapsed_ms(void) { return jbm_now_ms() - U.t0; }
 
-static float ui_scale(void) {
-    float kh = (float)G.h / 2400.0f;
-    float kw = (float)G.w / 1080.0f;
-    float k = kh < kw ? kh : kw;
-    if (k < 0.35f) k = 0.35f;
-    return k;
+/* The layout below is authored for the 720x1600 panel (SM-A225M). */
+static float dk(void) {
+    float a = (float)G.w / 720.0f;
+    float b = (float)G.h / 1600.0f;
+    return a < b ? a : b;
 }
 
-static void draw_bg(float k) {
-    u32 c1 = 0x0C111B, c2 = 0x05070C;
-    for (int y = 0; y < (int)G.h; y += 2) {
-        u32 t = (u32)((u32)y * 255u / (G.h > 1 ? G.h - 1 : 1));
-        fill_rect(0, y, (int)G.w, 2, mix(c1, c2, t) | 0xFF000000u);
-    }
-    int cx = (int)G.w / 2;
-    int cy = (int)((float)G.h * 0.16f);
-    int rad = (int)((float)G.w * 1.1f);
-    for (int i = 0; i < 26; i++) {
-        int rr = rad - i * (int)((float)G.w * 0.05f);
-        if (rr <= 0) break;
-        u32 a = (u32)(7 + i);
-        if (a > 40) a = 40;
-        ring(cx, cy, rr, (int)(k * 10.0f) + 4, (a << 24) | 0x6E86FF);
-    }
+static u32 mix_argb(u32 a1, u32 a2, u32 t) {
+    u32 r = (((a1 >> 16) & 0xFF) * (255 - t) + ((a2 >> 16) & 0xFF) * t) / 255;
+    u32 g = (((a1 >> 8) & 0xFF) * (255 - t) + ((a2 >> 8) & 0xFF) * t) / 255;
+    u32 b = ((a1 & 0xFF) * (255 - t) + (a2 & 0xFF) * t) / 255;
+    u32 al = (((a1 >> 24) & 0xFF) * (255 - t) + ((a2 >> 24) & 0xFF) * t) / 255;
+    return (al << 24) | (r << 16) | (g << 8) | b;
 }
 
-static void draw_icon(int kind, int cx, int cy, int r, u32 c) {
-    int t = r / 4 + 1;
-    switch (kind) {
-        case ACT_SYSTEM:
-            ring(cx, cy, r, t * 2, c);
-            tri(cx - r / 4, cy - r / 2, cx - r / 4, cy + r / 2, cx + r / 2, cy, c);
-            break;
-        case ACT_RECOVERY:
-            arc(cx, cy, r - t, t * 2, -70, 210, c);
-            tri(cx + r / 2, cy - r * 4 / 5, cx + r / 2, cy - r * 4 / 5 + r, cx + r * 5 / 4,
-                cy - r * 4 / 5 + r, c);
-            break;
-        case ACT_FASTBOOT:
-            quad(cx - r / 5, cy - r * 3 / 5, cx + r / 5, cy - r / 5, cx - r / 10, cy - r / 5,
-                 cx - r / 2, cy + r * 3 / 5, c);
-            quad(cx + r / 10, cy - r * 3 / 5, cx + r / 2, cy - r * 6 / 5, cx + r * 3 / 5,
-                 cy - r * 6 / 5, cx + r / 10, cy - r / 5, c);
-            break;
-        case ACT_DOWNLOAD:
-            fill_rect(cx - t, cy - r * 3 / 5, t * 2, r, c);
-            tri(cx - r / 2, cy - r / 5, cx - r / 2, cy + r / 5, cx, cy + r / 5 + r / 2, c);
-            tri(cx + r / 2, cy - r / 5, cx + r / 2, cy + r / 5, cx, cy + r / 5 + r / 2, c);
-            fill_rect(cx - r * 3 / 5, cy + r * 3 / 5, r * 6 / 5, t, c);
-            break;
-        case ACT_REBOOT:
-            arc(cx, cy, r - t, t * 2, 30, 320, c);
-            tri(cx - r * 5 / 4, cy - r / 2, cx - r * 5 / 4, cy + r / 3, cx - r / 2, cy - r / 8, c);
-            break;
-        default:
-            arc(cx, cy, r - t, t * 2, 120, 420, c);
-            fill_rect(cx - t, cy - r, t * 2, r + r / 2, c);
-            break;
+/* CSS linear-gradient(90deg, c1, c2) inside a rounded rect. */
+static void grad_rect(int x, int y, int w, int h, int r, u32 c1, u32 c2) {
+    if (w <= 0 || h <= 0) return;
+    if (r > w / 2) r = w / 2;
+    if (r > h / 2) r = h / 2;
+    if (r < 0) r = 0;
+    for (int row = 0; row < h; row++) {
+        int e = row < h - 1 - row ? row : h - 1 - row;
+        int in = (r > 0 && e < r) ? rr_inset(r, e) : 0;
+        int x0 = x + in, x1 = x + w - in;
+        if (x0 < 0) x0 = 0;
+        if (x1 > (int)G.w) x1 = (int)G.w;
+        int yy = y + row;
+        if (yy < 0 || yy >= (int)G.h) continue;
+        for (int i = x0; i < x1; i++)
+            blend(i, yy, mix_argb(c1, c2, (u32)((i - x) * 255 / (w > 1 ? w - 1 : 1))));
     }
 }
 
-static void card_geom(float k, int i, int *x, int *y, int *w, int *h) {
-    int pad = (int)((float)G.w * 0.052f);
-    *x = pad;
-    *w = (int)G.w - pad * 2;
-    *h = (int)((float)G.h * 0.093f);
-    int gap = (int)((float)G.h * 0.0085f);
-    int top = (int)((float)G.h * 0.142f);
-    *y = top + i * (*h + gap);
-    (void)k;
+/* CSS radial-gradient(circle, color, transparent 100%) inside a circle of r. */
+static void radial_glow(int cx, int cy, int r, u32 rgb, int amax) {
+    if (r <= 0 || amax <= 0) return;
+    for (int dy = -r; dy <= r; dy++) {
+        int yy = cy + dy;
+        if (yy < 0 || yy >= (int)G.h) continue;
+        int half = jbm_isqrt(r * r - dy * dy);
+        int x0 = cx - half, x1 = cx + half;
+        if (x0 < 0) x0 = 0;
+        if (x1 > (int)G.w - 1) x1 = (int)G.w - 1;
+        for (int xx = x0; xx <= x1; xx++) {
+            int dx = xx - cx;
+            int d = jbm_isqrt(dx * dx + dy * dy);
+            int t = 255 - (int)((i64)d * 255 / r);
+            if (t < 0) t = 0;
+            u32 a = (u32)((i64)amax * t / 255);
+            if (a) blend(xx, yy, (a << 24) | rgb);
+        }
+    }
+}
+
+/* Distance from (cx,cy) to the farthest screen corner (CSS "farthest-corner"). */
+static int farthest_corner(int cx, int cy) {
+    int dx = cx > (int)G.w - 1 - cx ? cx : (int)G.w - 1 - cx;
+    int dy = cy > (int)G.h - 1 - cy ? cy : (int)G.h - 1 - cy;
+    return jbm_isqrt(dx * dx + dy * dy);
+}
+
+/* Thin rotated ellipse outline (the ring around the brand planet icon). */
+static void ellipse_ring(int cx, int cy, int rx, int ry, int rot, int th, u32 c) {
+    int steps = 72;
+    int d = th / 2 < 1 ? 1 : th / 2;
+    float rr = (float)rot * 3.14159265f / 180.0f;
+    float cr = jbm_sinf(rr + 1.5707963f), sr = jbm_sinf(rr);
+    for (int i = 0; i < steps; i++) {
+        float t = 6.2831853f * (float)i / (float)steps;
+        float px = (float)rx * jbm_sinf(t + 1.5707963f);
+        float py = (float)ry * jbm_sinf(t);
+        int dx = cx + (int)(px * cr - py * sr);
+        int dy = cy + (int)(px * sr + py * cr);
+        disc(dx, dy, d, c);
+    }
+}
+
+/* 8-bit palette image with a 1-bit mask, blitted at (X,Y). */
+static void blit_img(const u32 *pal, const u8 *idx, const u8 *mask, int X, int Y, int W, int H) {
+    for (int y = 0; y < H; y++) {
+        int dy = Y + y;
+        if (dy < 0 || dy >= (int)G.h) continue;
+        for (int x = 0; x < W; x++) {
+            int dx = X + x;
+            if (dx < 0 || dx >= (int)G.w) continue;
+            u32 i = (u32)y * (u32)W + (u32)x;
+            if (!((mask[i >> 3] >> (7 - (i & 7))) & 1)) continue;
+            blend(dx, dy, pal[idx[i]]);
+        }
+    }
+}
+
+/* One 2px star per background tile, exactly like the mocks' .space::before. */
+static void star_field(int stepx, int stepy, int px, int py, int alpha) {
+    for (int y = py + stepy / 2; y < (int)G.h; y += stepy)
+        for (int x = px + stepx / 2; x < (int)G.w; x += stepx)
+            fill_rect(x, y, 2, 2, ((u32)alpha << 24) | 0xFFFFFF);
+}
+
+/* Space background (base + glow + stars + planet). Rendered once per screen
+ * into BG and blitted afterwards: the planet and stars never move. */
+static u8 *BG;
+static int BG_which = -1;
+
+static void draw_space(int which) {
+    if (BG && BG_which == which) {
+        memcpy(G.cv, BG, G.stride * G.h);
+        return;
+    }
+
+    fill_rect(0, 0, (int)G.w, (int)G.h, RGBA(0x020202FF));
+
+    if (which == BG_MENU) {
+        int gx = (int)(0.72f * (float)G.w), gy = (int)(0.45f * (float)G.h);
+        radial_glow(gx, gy, farthest_corner(gx, gy) * 38 / 100, 0x643E23, 31);
+        star_field(170, 170, 20, 30, 48);
+        star_field(260, 260, 100, 80, 29);
+        star_field(390, 390, 200, 150, 19);
+        /* .jupiter box-shadow: -45px 0 90px rgba(214,150,91,.10) */
+        radial_glow(PLM_X - (int)(45.0f * dk()), PLM_Y + PLM_H / 2, (int)(90.0f * dk()),
+                    0xD6965B, 25);
+        blit_img(PLM_PAL, PLM_IDX, PLM_MASK, PLM_X, PLM_Y, PLM_W, PLM_H);
+    } else {
+        int g1x = (int)(0.20f * (float)G.w), g1y = (int)(0.45f * (float)G.h);
+        int g2x = (int)(0.80f * (float)G.w), g2y = (int)(0.50f * (float)G.h);
+        radial_glow(g1x, g1y, farthest_corner(g1x, g1y) * 35 / 100, 0x82481E, 20);
+        radial_glow(g2x, g2y, farthest_corner(g2x, g2y) * 40 / 100, 0xB46428, 10);
+        star_field(173, 211, 20, 40, 102);
+        star_field(251, 187, 100, 120, 57);
+        star_field(331, 293, 240, 30, 77);
+        /* .jupiter drop-shadow(-5px 0 25px rgba(180,100,40,.15)) */
+        radial_glow(PLB_X - (int)(5.0f * dk()), PLB_Y + PLB_H / 2, (int)(38.0f * dk()),
+                    0xB46428, 38);
+        blit_img(PLB_PAL, PLB_IDX, PLB_MASK, PLB_X, PLB_Y, PLB_W, PLB_H);
+    }
+
+    if (!BG) {
+        BG = (u8 *)jbm_mmap(G.stride * G.h, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
+                            -1, 0);
+        if (!BG) jbm_log("jbm: bg cache unavailable, redrawing every frame");
+    }
+    if (BG) {
+        memcpy(BG, G.cv, G.stride * G.h);
+        BG_which = which;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* menu geometry: .interface left:7vw top:9vh width:370px, .menu gap   */
+/* ------------------------------------------------------------------ */
+
+static void btn_geom(int i, int *x, int *y, int *w, int *h) {
+    float k = dk();
+    *x = (int)((float)G.w * 0.07f);
+    *w = (int)(430.0f * k);
+    *h = (int)(94.0f * k);
+    int top = (int)((float)G.h * 0.09f) + (int)(38.0f * k) + (int)(5.0f * k) +
+              (int)(45.0f * k); /* brand + empty .device + its margin-bottom */
+    *y = top + i * (*h + (int)(12.0f * k));
+}
+
+static int hit_btn(int px, int py) {
+    for (int i = 0; i < ACT_COUNT; i++) {
+        int x, y, w, h;
+        btn_geom(i, &x, &y, &w, &h);
+        if (px >= x && px < x + w && py >= y && py < y + h) return i;
+    }
+    return -1;
 }
 
 static i64 countdown_left(void) {
     if (!U.countdown_on) return 0;
     i64 el = jbm_now_ms() - U.t0 - JBM_INTRO_MS;
+    if (el < 0) el = 0; /* the intro animation is not part of the countdown */
     i64 left = U.countdown_ms - el;
     return left < 0 ? 0 : left;
 }
 
 static void draw_ui(void) {
-    float k = ui_scale();
-    i64 now = jbm_now_ms();
-    i64 elapsed = now - U.t0;
+    float k = dk();
+    i64 elapsed = elapsed_ms();
 
-    draw_bg(k);
+    draw_space(BG_MENU);
 
-    int pad = (int)((float)G.w * 0.052f);
-    i64 intro_el = elapsed_ms() < JBM_INTRO_MS ? elapsed_ms() : JBM_INTRO_MS;
-    int slide = (int)((JBM_INTRO_MS - intro_el) * 100 / JBM_INTRO_MS);
-    int ey = slide * (int)((float)G.h * 0.03f) / 100;
+    int ix = (int)((float)G.w * 0.07f);
+    int by = (int)((float)G.h * 0.09f);
+    int br = (int)(19.0f * k); /* .planet-icon: 38px */
+    int bcy = by + br;
 
-    draw_text(&FN48, pad, (int)((float)G.h * 0.042f) + ey, 48.0f * k, RGBA(0xEAF0FAFF), "Boot Manager", TA_L | VA_M);
-    draw_text(&FN20, pad, (int)((float)G.h * 0.072f) + ey, 20.0f * k, RGBA(0x6E7C93FF), "CUSTOM BOOT MENU",
-              TA_L | VA_M);
-    draw_text(&FN20, (int)G.w - pad, (int)((float)G.h * 0.045f) + ey, 20.0f * k,
-              (act_color[U.sel] | 0xFF000000u), JBM_VERSION, TA_R | VA_M);
-
-    fill_rect(pad, (int)((float)G.h * 0.112f) + ey, (int)(3.0f * k) + 1, (int)((float)G.h * 0.018f),
-              RGBA(0x2A3446FF));
-
-    if (U.busy) {
-        for (int i = 0; i < ACT_COUNT; i++) {
-            int x, y, w, h;
-            card_geom(k, i, &x, &y, &w, &h);
-            i64 start = 60 + i * 55;
-            i64 a = elapsed - start;
-            if (a < 0) continue;
-            int alpha = (int)(255 * (a < 260 ? (a < 0 ? 0 : a) / 260.0f : 1.0f));
-            if (alpha < 0) alpha = 0;
-            if (alpha > 255) alpha = 255;
-            if (alpha < 6) continue;
-            int off = (int)((260 - a > 0 ? (260 - a) / 260.0f : 0.0f) * (float)G.w * 0.06f);
-            int sel = (i == U.sel);
-            u32 base = sel ? RGBA(0x19212FFFu) : RGBA(0x111823FFu);
-            round_rect(x + off, y, w, h, (int)((float)h * 0.22f), base);
-            round_rect_border(x + off, y, w, h, (int)((float)h * 0.22f), (int)(2.0f * k) + 1,
-                              (sel ? ((u32)act_color[i] | 0xFF000000u) : RGBA(0x232E3FFFu)));
-            if (sel) {
-                fill_rect(x + off, y + (int)((float)h * 0.22f) - (int)(10.0f * k), (int)(5.0f * k),
-                          h - (int)((float)h * 0.44f) + (int)(20.0f * k),
-                          (act_color[i] & 0xFFFFFF) | ((u32)alpha << 24));
-            }
-            int icy = y + h / 2;
-            int ir = (int)((float)h * 0.28f);
-            disc(x + off + (int)((float)h * 0.38f), icy, ir, (u32)((act_color[i] & 0xFFFFFF) | 0x24000000u));
-            draw_icon(i, x + off + (int)((float)h * 0.38f), icy, ir,
-                      (act_color[i] & 0xFFFFFF) | ((u32)alpha << 24));
-            draw_text(&FN32, x + off + (int)((float)h * 0.72f), icy - (int)(14.0f * k), 34.0f * k,
-                      0xEAF0FAu | ((u32)alpha << 24), act_label[i], TA_L | VA_B);
-            draw_text(&FN20, x + off + (int)((float)h * 0.72f), icy + (int)(12.0f * k), 20.0f * k,
-                      0x8A97ACu | ((u32)(alpha * 200 / 255) << 24), act_sub[i], TA_L | VA_T);
-            if (sel) {
-                int ax = x + off + w - (int)((float)h * 0.34f);
-                disc(ax, icy, (int)(9.0f * k) + 2, (act_color[i] & 0xFFFFFF) | ((u32)alpha << 24));
-                ring(ax, icy, (int)((float)h * 0.19f), (int)(3.0f * k) + 1,
-                     (act_color[i] & 0xFFFFFF) | 0x38000000u);
-            }
-        }
-
-        int fy = (int)((float)G.h * 0.80f);
-        draw_text(&FN32, pad, fy, 34.0f * k, RGBA(0xEAF0FAFF), U.status, TA_L | VA_M);
-        int bw = (int)G.w - pad * 2;
-        fill_rect(pad, fy + (int)((float)G.h * 0.024f), bw, (int)((float)G.h * 0.0042f) + 1, RGBA(0x1B2431FF));
-        int seg = bw / 5;
-        int phase = (int)((now / 80) % 5);
-        for (int i = 0; i < 5; i++)
-            fill_rect(pad + i * seg + seg / 5, fy + (int)((float)G.h * 0.024f), seg * 3 / 5,
-                      (int)((float)G.h * 0.0042f) + 1, i == phase ? (act_color[U.sel] | 0xFF000000u)
-                                                                  : RGBA(0x1B2431FF));
-        return;
-    }
+    ring(ix + br, bcy, br, (int)(2.0f * k) + 1, RGBA(0xBD7946FF));
+    ellipse_ring(ix + br, bcy, (int)(21.5f * k), (int)(6.0f * k), -18, (int)(2.0f * k),
+                 RGBA(0xBD7946FF));
+    float bpx = 28.0f * k;
+    int nx = ix + (int)(38.0f * k) + (int)(14.0f * k); /* gap:14px */
+    draw_text_ls(&FN32, nx, bcy, bpx, 0, RGBA(0xEEEEEEFF), "Jupiter", TA_L | VA_M);
+    draw_text_ls(&FN32, nx + measure(&FN32, "Jupiter", bpx, 0), bcy, bpx, 0,
+                 RGBA(0xC47B48FF), "Boot", TA_L | VA_M);
 
     for (int i = 0; i < ACT_COUNT; i++) {
         int x, y, w, h;
-        card_geom(k, i, &x, &y, &w, &h);
-        i64 start = 60 + i * 55;
-        i64 a = elapsed - start;
-        if (a < 0) continue;
-        int ease = a < 300 ? (int)(a / 300.0f * 255.0f) : 255;
-        if (ease < 0) ease = 0;
-        if (ease > 255) ease = 255;
-        int off = (int)((255 - ease) / 255.0f * (float)G.w * 0.08f);
+        btn_geom(i, &x, &y, &w, &h);
+        i64 a = elapsed - (60 + i * 55);
+        int alpha = a < 0 ? 0 : (a < 260 ? (int)(a * 255 / 260) : 255);
+        if (alpha < 6) continue;
         int sel = (i == U.sel);
-        int radius = (int)((float)h * 0.22f);
-
-        int lift = sel ? (int)((float)G.h * 0.0018f) : 0;
-        int cy = y - lift;
-
-        u32 card = sel ? RGBA(0x18212FFFu) : RGBA(0x111823FFu);
-        round_rect(x + off, cy, w, h, radius, card);
-        round_rect_border(x + off, cy, w, h, radius, (int)(2.0f * k) + 1,
-                          sel ? ((act_color[i] & 0xFFFFFF) | 0xCD000000u) : RGBA(0x232E3FFFu));
-
-        if (sel) fill_rect(x + off, cy + radius - (int)(10.0f * k), (int)(5.0f * k),
-                           h - radius * 2 + (int)(20.0f * k), act_color[i] | 0xFF000000u);
-
-        int icy = cy + h / 2;
-        int icx = x + off + (int)((float)h * 0.38f);
-        int ir = (int)((float)h * 0.28f);
-        disc(icx, icy, ir, (act_color[i] & 0xFFFFFF) | 0x26000000u);
-        draw_icon(i, icx, icy, ir, act_color[i] | 0xFF000000u);
-
-        if (i == ACT_SYSTEM) {
-            i64 left = countdown_left();
-            i64 secs = (left + 999) / 1000;
-            char num[8];
-            num[0] = (char)('0' + (int)(secs / 10) % 10);
-            num[1] = (char)('0' + (int)(secs % 10));
-            num[2] = 0;
-            draw_text(&FDIG, (int)G.w - pad - (int)((float)G.w * 0.13f), icy, 132.0f * k,
-                      (act_color[i] & 0xFFFFFF) | (U.countdown_on ? 0xFF000000u : 0x60000000u), num,
-                      TA_R | VA_M);
-        }
-
-        draw_text(&FN32, x + off + (int)((float)h * 0.72f), icy - (int)(13.0f * k), 34.0f * k,
-                  RGBA(0xEAF0FAFF), act_label[i], TA_L | VA_B);
-        draw_text(&FN20, x + off + (int)((float)h * 0.72f), icy + (int)(13.0f * k), 20.0f * k,
-                  RGBA(0x8A97ACFF), act_sub[i], TA_L | VA_T);
-
         if (sel) {
-            int ax = x + off + w - (int)((float)h * 0.34f);
-            int dot = (int)(9.0f * k) + 2;
-            int rr = (int)((float)h * 0.20f);
-            if (U.hold_idx == i) {
-                i64 held = now - U.hold_start;
-                i64 need = act_hold_ms[i] > 0 ? act_hold_ms[i] : 1;
-                int sweep = (int)((float)rr * (float)(held % 1200) / 1200.0f);
-                if (sweep < 1) sweep = 1;
-                ring(ax, icy, rr, (int)(4.0f * k) + 1, RGBA(0x1F6FEB4Fu));
-                ring(ax, icy, rr, (int)(4.0f * k) + 1, (act_color[i] & 0xFFFFFF) | 0xFF000000u);
-                arc(ax, icy, rr, (int)(5.0f * k) + 2, -90, -90 + (int)(360.0f * (float)held / (float)need),
-                    act_color[i] | 0xFF000000u);
-                (void)sweep;
-            } else {
-                ring(ax, icy, rr, (int)(3.0f * k) + 1, (act_color[i] & 0xFFFFFF) | 0x40000000u);
-            }
-            disc(ax, icy, dot, act_color[i] | 0xFF000000u);
+            grad_rect(x, y, w, h, (int)(7.0f * k), ((u32)(alpha * 56 / 255) << 24) | 0xB86837,
+                      ((u32)(alpha * 6 / 255) << 24) | 0xB86837);
+            round_rect_border(x, y, w, h, (int)(7.0f * k), 1,
+                              ((u32)(alpha * 64 / 255) << 24) | 0xD88A4E);
+            fill_rect(x, y + (int)(8.0f * k), (int)(2.0f * k) + 1, h - (int)(16.0f * k),
+                      ((u32)alpha << 24) | 0xDF9255);
         }
+        char lab[24];
+        up_str(lab, act_label[i], sizeof(lab));
+        u32 tc = ((u32)alpha << 24) | (sel ? 0xFFFFFFu : 0x858585u);
+        draw_text_ls(&FN20, x + (int)(30.0f * k), y + h / 2, 19.0f * k, (int)(2.5f * k), tc, lab,
+                     TA_L | VA_M);
     }
 
-    int fy = (int)((float)G.h * 0.855f);
+    int x0, y0, w0, h0;
+    btn_geom(ACT_COUNT - 1, &x0, &y0, &w0, &h0);
+    int foot_y = y0 + h0 + (int)(34.0f * k);
+
+    /* The autoboot readout used to be a 9px footer line whose ink was only 6px
+     * tall, which is unreadable on the 720x1600 panel. It is now a progress bar
+     * plus a 15px countdown, kept left of the planet art (PLM_X) so it never
+     * sits on top of the artwork. */
+    int cw = PLM_X - ix - (int)(18.0f * k);
+    if (cw > w0 || cw < (int)(120.0f * k)) cw = w0;
+
     if (U.countdown_on) {
         i64 left = countdown_left();
-        char lbl[160];
-        jbm_sn(lbl, "Auto-starting System in %llds", (long long)((left + 999) / 1000));
-        draw_text(&FN20, pad, fy, 20.0f * k, RGBA(0x6E7C93FF), lbl, TA_L | VA_M);
-        int bw = (int)G.w - pad * 2;
-        int by = (int)((float)G.h * 0.885f);
-        fill_rect(pad, by, bw, (int)((float)G.h * 0.0035f) + 1, RGBA(0x1B2431FF));
         i64 total = U.countdown_ms > 0 ? U.countdown_ms : 1;
-        i64 prog = total - left;
-        if (prog < 0) prog = 0;
-        if (prog > total) prog = total;
-        fill_rect(pad, by, (int)((i64)bw * prog / total), (int)((float)G.h * 0.0035f) + 1, RGBA(0x34D399EB));
+        int bh = (int)(6.0f * k) + 1;
+        fill_rect(ix, foot_y, cw, bh, RGBA(0x141A24FF));
+        int fw = (int)((left * cw) / total);
+        if (fw > 0) fill_rect(ix, foot_y, fw > cw ? cw : fw, bh, RGBA(0xE08B45FF));
+
+        char cd[32];
+        jbm_sn(cd, "AUTO-BOOT %lldS", (long long)((left + 999) / 1000));
+        int cpx = 15.0f * k, cls = (int)(3.0f * k);
+        int ty = foot_y + bh + (int)(16.0f * k);
+        draw_text_ls(&FN32, ix, ty, cpx, cls, RGBA(0xE8965AFF), cd, TA_L | VA_T);
+        draw_text_ls(&FN20, ix + measure(&FN32, cd, cpx, cls) + (int)(9.0f * k), ty + (int)(7.0f * k),
+                     9.0f * k, (int)(1.4f * k), RGBA(0x6E7683FF), "TAP TO CANCEL", TA_L | VA_T);
     } else {
-        draw_text(&FN20, pad, fy, 20.0f * k, RGBA(0x6E7C93FF), "Auto-start cancelled - pick an option",
-                  TA_L | VA_M);
+        char lab[24], msg[72];
+        up_str(lab, act_label[U.sel], sizeof(lab));
+        jbm_sn(msg, "%s SELECTED - TAP TO RUN", lab);
+        draw_text_ls(&FN20, ix, foot_y, 10.0f * k, (int)(1.6f * k), RGBA(0x6E7683FF), msg,
+                     TA_L | VA_T);
     }
-    draw_text(&FN20, pad, (int)((float)G.h * 0.915f), 20.0f * k, RGBA(0x4E5A6EFF),
-              "Tap System to boot now. Hold Recovery, Download, Fastboot, Reboot or Power off.", TA_L | VA_M);
 }
 
-static int hit_card(int px, int py) {
-    float k = ui_scale();
-    for (int i = 0; i < ACT_COUNT; i++) {
-        int x, y, w, h;
-        card_geom(k, i, &x, &y, &w, &h);
-        if (px >= x && px < x + w && py >= y && py < y + h) return i;
-    }
-    return -1;
+/* One-line subtitle per mode, so every action says what it is about to do. */
+static const char *act_sub[ACT_COUNT] = {
+    "Starting Android...", "Requesting recovery reboot...", "Rebooting to bootloader...",
+    "Requesting download mode...", "Restarting device...", "Shutting down..."};
+
+/* Kicker above the big mode name; "STARTING" only reads well for System. */
+static const char *act_kicker(int idx) {
+    if (idx == ACT_SYSTEM) return "STARTING";
+    if (idx == ACT_REBOOT) return "RESTARTING";
+    if (idx == ACT_POWEROFF) return "SHUTTING DOWN";
+    return "ENTERING";
+}
+
+/* The screen shown while an action is pending: the boot artwork, the mode name
+ * and a spinner. Used both for System (then chains to the real init) and for
+ * every other mode (then runs the action), so any tap has obvious feedback. */
+static void draw_action(int idx) {
+    float k = dk();
+
+    draw_space(BG_BOOT);
+
+    int ix = (int)((float)G.w * 0.06f); /* @900px: left:6vw */
+    int by = (int)((float)G.h * 0.09f);
+    int br = (int)(29.0f * k); /* .brand-icon: 58px */
+    int bcy = by + br;
+
+    ring(ix + br, bcy, br, (int)(2.0f * k) + 1, RGBA(0xC87335FF));
+    ellipse_ring(ix + br, bcy, (int)(35.0f * k), (int)(11.0f * k), -33, (int)(2.0f * k),
+                 RGBA(0xC87335FF));
+    disc(ix + br + (int)(15.0f * k), bcy - (int)(24.0f * k), (int)(4.0f * k), RGBA(0xC87335FF));
+
+    float bpx = 30.0f * k;
+    int bls = (int)(4.0f * k);
+    int nx = ix + (int)(58.0f * k) + (int)(20.0f * k); /* gap:20px */
+    draw_text_ls(&FN32, nx, bcy, bpx, bls, RGBA(0xEEEEEEFF), "Jupiter", TA_L | VA_M);
+    draw_text_ls(&FN32, nx + measure(&FN32, "Jupiter", bpx, bls), bcy, bpx, bls,
+                 RGBA(0xC87335FF), "Boot", TA_L | VA_M);
+
+    char big[24];
+    up_str(big, act_label[idx], sizeof(big));
+
+    int y = by + br * 2 + (int)(130.0f * k); /* .boot-content margin-top (@900px) */
+    draw_text_ls(&FN20, ix, y, 17.0f * k, (int)(7.0f * k), RGBA(0xDDDDDDFF), act_kicker(idx),
+                 TA_L | VA_T);
+    y += line_h(17.0f * k) + (int)(18.0f * k);
+
+    /* Shrink the headline until a long mode name ("POWER OFF") fits the panel. */
+    float hpx = 54.0f * k;
+    int avail = (int)G.w - ix - (int)(24.0f * k);
+    while (hpx > 16.0f * k && measure(&FN48, big, hpx, (int)(hpx * 0.26f)) > avail)
+        hpx -= 1.0f * k;
+    int hls = (int)(hpx * 0.26f);
+    draw_text_ls(&FN48, ix - (int)(2.0f * k), y, hpx, hls, RGBA(0xC87335FF), big, TA_L | VA_T);
+    y += line_h(hpx) + (int)(42.0f * k);
+
+    /* Shrink the subtitle the same way; "Requesting download mode..." is long. */
+    float spx = 20.0f * k;
+    int savail = (int)G.w - ix - (int)(24.0f * k);
+    while (spx > 11.0f * k && measure(&FN20, act_sub[idx], spx, (int)(5.0f * k)) > savail)
+        spx -= 0.5f * k;
+    draw_text_ls(&FN20, ix, y, spx, (int)(5.0f * k), RGBA(0xDDDDDDFF), act_sub[idx], TA_L | VA_T);
+    y += line_h(spx) + (int)(48.0f * k);
+
+    /* .loader: 70px ring, 6px, 1.15s/turn with a 180 degree coloured arc */
+    int lcx = ix + (int)(35.0f * k), lcy = y + (int)(35.0f * k);
+    ring(lcx, lcy, (int)(35.0f * k), (int)(6.0f * k), RGBA(0xFFFFFF1A));
+    i64 el = jbm_now_ms() - U.boot_t0;
+    int rot = (int)((el % 1150) * 360 / 1150);
+    arc(lcx, lcy, (int)(35.0f * k), (int)(6.0f * k), -45 - rot, 135 - rot, RGBA(0xC87335FF));
+
+    /* footer: "JUPITERBOOT · SYSTEM", bottom:7vh */
+    float fpx = 11.0f * k;
+    int fls = (int)(4.0f * k);
+    int fy = (int)((float)G.h - (float)G.h * 0.07f);
+    draw_text_ls(&FN20, ix, fy, fpx, fls, RGBA(0x8B542FFF), "JUPITERBOOT", TA_L | VA_B);
+    int fx = ix + measure(&FN20, "JUPITERBOOT", fpx, fls) + (int)(7.0f * k);
+    disc(fx, fy - (int)(fpx * 0.4f), (int)(1.2f * k) + 1, RGBA(0x666666FF));
+    draw_text_ls(&FN20, fx + (int)(7.0f * k), fy, fpx, fls, RGBA(0x666666FF), big, TA_L | VA_B);
+}
+
+/* A confirmed row switches to the action screen. System keeps it up for
+ * JBM_BOOT_MS and then chains to /init.system; every other mode keeps it up for
+ * JBM_ACTION_MS and then runs the action. */
+static void start_action(int idx) {
+    U.sel = idx;
+    U.act = idx;
+    U.mode = (idx == ACT_SYSTEM) ? UI_BOOT : UI_BUSY;
+    U.boot_t0 = jbm_now_ms();
+    ui_dirty = 1;
+    jbm_log("jbm: action %s confirmed, mode=%d, screen up for %d ms", act_label[idx], U.mode,
+            U.mode == UI_BOOT ? JBM_BOOT_MS : JBM_ACTION_MS);
 }
 
 static void present(void) {
@@ -1699,13 +1794,16 @@ static void dev_init(void) {
 }
 
 #ifdef JBM_HOST
-/* Host preview: renders the real draw_ui() path into an off-screen ARGB8888
- * canvas and writes a binary PPM, so layout and colours can be checked without
- * a device. Usage: jbm_host [out.ppm] [at_ms_into_countdown]
+/* Host preview: renders the real draw_ui()/draw_action() path into an
+ * off-screen ARGB8888 canvas at the panel size (720x1600) and writes a binary
+ * PPM, so layout and colours can be checked without a device.
+ * Usage: jbm_host out.ppm [at_ms] [mode]   mode: 0 menu, 1 menu/Recovery,
+ *                                                  2 booting System,
+ *                                                  3 action Recovery
  */
-static void host_preview(const char *path, i64 at_ms) {
-    G.w = 1080;
-    G.h = 2400;
+static void host_preview(const char *path, i64 at_ms, int mode) {
+    G.w = 720;
+    G.h = 1600;
     G.bpp = 32;
     G.stride = G.w * 4;
     G.len = G.stride * G.h;
@@ -1722,13 +1820,16 @@ static void host_preview(const char *path, i64 at_ms) {
     }
     G.ok = 1;
 
-    U.sel = ACT_SYSTEM;
-    U.hold_idx = -1;
+    U.sel = (mode == 1) ? ACT_RECOVERY : ACT_SYSTEM;
+    U.act = (mode == 3) ? ACT_RECOVERY : ACT_SYSTEM;
+    U.mode = (mode == 2 || mode == 3) ? ((mode == 3) ? UI_BUSY : UI_BOOT) : UI_MENU;
     U.t0 = jbm_now_ms() - at_ms;
+    U.boot_t0 = jbm_now_ms() - at_ms;
     U.countdown_ms = JBM_AUTOBOOT_SEC * 1000;
-    U.countdown_on = JBM_AUTOBOOT_SEC > 0;
+    U.countdown_on = JBM_AUTOBOOT_SEC > 0 && mode != 1;
 
-    draw_ui();
+    if (U.mode == UI_MENU) draw_ui();
+    else draw_action(U.act);
 
     FILE *f = fopen(path, "wb");
     if (!f) {
@@ -1745,8 +1846,8 @@ static void host_preview(const char *path, i64 at_ms) {
         }
     }
     fclose(f);
-    fprintf(stderr, "[jbm:host] wrote %s (%ux%u, countdown %llds left)\n", path, G.w, G.h,
-            (long long)((countdown_left() + 999) / 1000));
+    fprintf(stderr, "[jbm:host] wrote %s (%ux%u, mode %d, countdown %llds left)\n", path, G.w, G.h,
+            mode, (long long)((countdown_left() + 999) / 1000));
 }
 
 int main(int argc, char **argv) {
@@ -1754,12 +1855,13 @@ int main(int argc, char **argv) {
     dev_init();
     if (argc >= 2) {
         i64 at_ms = argc >= 3 ? (i64)atoi(argv[2]) : 0;
-        host_preview(argv[1], at_ms);
+        int mode = argc >= 4 ? atoi(argv[3]) : 0;
+        host_preview(argv[1], at_ms, mode);
         return 0;
     }
     touch_open();
     fprintf(stderr, "[jbm:host] gfx_ok=%d touch_fd=%d\n", G.ok, T.fd);
-    fprintf(stderr, "[jbm:host] usage: %s out.ppm [at_ms]\n", argv[0]);
+    fprintf(stderr, "[jbm:host] usage: %s out.ppm [at_ms] [mode 0|1|2|3]\n", argv[0]);
     return 0;
 }
 #endif
@@ -1803,13 +1905,17 @@ int jbm_main(int argc, char **argv, char **envp) {
     touch_open();
 
     U.sel = ACT_SYSTEM;
-    U.hold_idx = -1;
+    U.act = ACT_SYSTEM;
+    U.mode = UI_MENU;
     U.t0 = jbm_now_ms();
     U.countdown_ms = JBM_AUTOBOOT_SEC * 1000;
     U.countdown_on = JBM_AUTOBOOT_SEC > 0;
 
     i64 start = U.t0;
     i64 last_draw = 0;
+    i64 last_sync = 0;
+    i64 last_cd = -1;
+    i64 last_mode = UI_MENU;
     int kicked = 0;
     i64 kick_t = 0;
 
@@ -1817,63 +1923,62 @@ int jbm_main(int argc, char **argv, char **envp) {
         i64 now = jbm_now_ms();
         touch_poll();
 
-        if (T.pressed) {
+        /* One tap runs the row under the finger: press highlights it, release
+         * executes it. A confirm-by-second-tap model only ever looked like a
+         * dead menu. */
+        if (T.pressed && U.mode == UI_MENU) {
             U.countdown_on = 0;
-            int idx = hit_card(T.sx, T.sy);
+            int idx = hit_btn(T.sx, T.sy);
             if (idx >= 0) {
                 U.sel = idx;
-                U.hold_idx = (act_hold_ms[idx] > 0) ? idx : -1;
-                if (U.hold_idx >= 0) U.hold_start = now;
+                ui_dirty = 1;
+            }
+        }
+        if (T.released && U.mode == UI_MENU) {
+            int idx = hit_btn(T.tap_x, T.tap_y);
+            if (idx >= 0) start_action(idx);
+        }
+
+        if (U.mode == UI_MENU && U.countdown_on) {
+            i64 s = countdown_left() / 1000;
+            if (s != last_cd) {
+                last_cd = s;
+                jbm_log("jbm: autoboot %llds left", (long long)s);
+            }
+            if (elapsed_ms() >= JBM_INTRO_MS && countdown_left() <= 0) {
+                U.countdown_on = 0;
+                start_action(ACT_SYSTEM);
             }
         }
 
-        if (U.hold_idx >= 0) {
-            int idx = hit_card(T.sx, T.sy);
-            if (idx != U.hold_idx) {
-                U.hold_idx = -1;
-            } else if (now - U.hold_start >= act_hold_ms[U.hold_idx]) {
-                int go = U.hold_idx;
-                U.hold_idx = -1;
-                U.busy = 1;
-                jbm_sn(U.status, "Starting %s...", act_label[go]);
-                for (int f = 0; f < 3; f++) {
-                    draw_ui();
-                    present();
-                    jbm_sleep_ms(70);
-                }
-                jbm_log("jbm: action %s confirmed", act_label[go]);
-                perform(go, argv, envp);
-            }
+        /* System keeps the booting screen up for JBM_BOOT_MS and then chains to
+         * the real init; the other modes run their action after JBM_ACTION_MS,
+         * so the screen change is actually visible before the reboot. */
+        if (U.mode == UI_BOOT && now - U.boot_t0 >= JBM_BOOT_MS) {
+            jbm_log("jbm: boot screen done after %lld ms, chaining", (long long)(now - U.boot_t0));
+            cleanup_and_chain(argv, envp, "boot screen elapsed");
         }
-
-        if (T.released) {
-            int idx = hit_card(T.tap_x, T.tap_y);
-            if (idx >= 0 && act_hold_ms[idx] == 0 && U.hold_idx < 0) {
-                U.sel = idx;
-                U.busy = 1;
-                jbm_sn(U.status, "Starting %s...", act_label[idx]);
-                for (int f = 0; f < 3; f++) {
-                    draw_ui();
-                    present();
-                    jbm_sleep_ms(70);
-                }
-                jbm_log("jbm: action %s tapped", act_label[idx]);
-                perform(idx, argv, envp);
-            }
-            U.hold_idx = -1;
-        }
-
-        if (U.countdown_on && elapsed_ms() >= JBM_INTRO_MS && countdown_left() <= 0) {
-            cleanup_and_chain(argv, envp, "countdown elapsed");
+        if (U.mode == UI_BUSY && now - U.boot_t0 >= JBM_ACTION_MS) {
+            jbm_log("jbm: action screen done after %lld ms, running %s", (long long)(now - U.boot_t0),
+                    act_label[U.act]);
+            perform(U.act, argv, envp);
         }
 
         if (now - start > (i64)JBM_TOTAL_TIMEOUT_SEC * 1000) {
             cleanup_and_chain(argv, envp, "safety timeout");
         }
 
-        if (now - last_draw > 33) {
-            draw_ui();
+        if (ui_dirty || now - last_draw > 33) {
+            int changed = ui_dirty;
+            if (U.mode == UI_MENU) draw_ui();
+            else draw_action(U.act);
             present();
+            if (changed || U.mode != last_mode) {
+                jbm_log("jbm: drew mode %d, reapplying fb", U.mode);
+                gfx_reapply();
+            }
+            last_mode = U.mode;
+            ui_dirty = 0;
             last_draw = now;
             /* Two kicks: right after the first frame (so the layer is
              * reprogrammed with the menu already in memory) and once more
@@ -1888,6 +1993,13 @@ int jbm_main(int argc, char **argv, char **envp) {
             }
         } else {
             jbm_sleep_ms(8);
+        }
+
+        /* Heartbeat: one cheap mode re-apply per second, so a dropped update
+         * cannot leave the panel stuck on an old screen. */
+        if (now - last_sync > 1000) {
+            last_sync = now;
+            gfx_reapply();
         }
     }
     return 0;

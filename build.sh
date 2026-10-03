@@ -59,8 +59,15 @@ fi
 
 say "building host UI preview"
 "$CC" -DJBM_HOST -O2 -Wall -Wextra -Wno-unused-parameter -o "$BUILD/jbm_host" "$SRC"
-"$BUILD/jbm_host" "$BUILD/ui-preview.ppm" 4000
-"$BUILD/jbm_host" "$BUILD/ui-preview-intro.ppm" 120
+"$BUILD/jbm_host" "$BUILD/ui-preview.ppm" 4000 0
+"$BUILD/jbm_host" "$BUILD/ui-preview-intro.ppm" 120 0
+"$BUILD/jbm_host" "$BUILD/ui-preview-sel.ppm" 4000 1
+"$BUILD/jbm_host" "$BUILD/ui-booting.ppm" 600 2
+"$BUILD/jbm_host" "$BUILD/ui-action.ppm" 600 3
+MAGICK_BIN=$(command -v magick >/dev/null 2>&1 && echo magick || echo convert)
+for p in ui-preview ui-preview-intro ui-preview-sel ui-booting ui-action; do
+  [ -f "$BUILD/$p.ppm" ] && "$MAGICK_BIN" "$BUILD/$p.ppm" "$BUILD/$p.png"
+done
 
 say "unpacking $(basename "$IMG_IN")"
 rm -rf "$UNPACK" "$STAGE" "$VERIFY"

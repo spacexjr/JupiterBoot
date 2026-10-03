@@ -15,21 +15,42 @@ executes. The repository never flashes anything: the build only produces
    the UI.
 3. After the auto-start countdown (default 15 s) it chains to `/init.system`,
    which continues the normal second-stage boot.
-4. If the framebuffer is unavailable, the menu chains to `/init.system`
+4. Selecting **System** switches to the booting screen, waits 2 s, then chains
+   to `/init.system`.
+5. Every other mode switches to the same action screen (naming the mode and what
+   it is about to do) for 1.5 s before the action runs, so the tap always has
+   visible feedback.
+6. If the framebuffer is unavailable, the menu chains to `/init.system`
    immediately without drawing anything.
 
 ## Menu actions
 
-| Action    | Hold  | Behaviour                                              |
-|-----------|-------|--------------------------------------------------------|
-| System    | tap   | Boot the installed Android (runs `/init.system`)       |
-| Recovery  | 900ms | Reboot with reason `recovery` (no flash write)         |
-| Fastboot  | 700ms | Reboot to bootloader                                   |
-| Download  | 900ms | Reboot with reason `download`                           |
-| Reboot    | 700ms | Restart the device                                     |
-| Power off | 900ms | Shut the device down                                   |
+Touch model: one tap runs the row under the finger (press highlights it,
+release executes it).
 
-Any touch cancels the countdown so the device waits for a decision.
+| Action    | Behaviour                                                |
+|-----------|----------------------------------------------------------|
+| System    | Booting screen for 2 s, then run `/init.system`          |
+| Recovery  | Reboot with reason `recovery` (no flash write)           |
+| Fastboot  | Reboot to bootloader                                     |
+| Download  | Reboot with reason `download`                            |
+| Reboot    | Restart the device                                       |
+| Power off | Shut the device down                                     |
+
+Every row goes through the same action screen first, so there is always visible
+feedback before the action runs.
+
+Any touch cancels the countdown so the device waits for a decision; the bar is
+replaced by a `MODE SELECTED - TAP TO RUN` hint.
+
+## Framebuffer note
+
+mtkfb only latches a frame when the layer's mode is re-applied
+(`FBIOPUT_VSCREENINFO` with `FB_ACTIVATE_FORCE`), so a plain `memcpy` into the
+scanout buffer can stay invisible. The menu therefore re-applies the mode after
+every screen change (`gfx_reapply()`) and once a second as a heartbeat, on top
+of the two full blank/unblank kicks it does at startup. Without this the panel
+keeps showing the first menu frame forever.
 
 ## Safety model
 
@@ -65,7 +86,8 @@ Requirements:
 - `nm`, `file`, `stat`.
 - `magiskboot` next to this README (already present).
 - The original `boot.img` in the repository root.
-- Python 3 + Pillow only if regenerating the font.
+- Python 3 + Pillow only if regenerating the font (add Inkscape for the
+  planet art).
 
 ```sh
 ./build.sh            # uses ./boot.img
@@ -74,8 +96,12 @@ Requirements:
 
 The script:
 
-1. Builds the host UI preview (`out/ui-preview.ppm`, after the intro, and
-   `out/ui-preview-intro.ppm`, mid-animation) from the real drawing path.
+1. Builds the host UI previews from the real drawing path:
+   `out/ui-preview.png` (menu, System selected, countdown running),
+   `out/ui-preview-intro.png` (mid intro animation),
+   `out/ui-preview-sel.png` (Recovery selected, no countdown),
+   `out/ui-booting.png` (the "Booting System" screen) and
+   `out/ui-action.png` (the same screen for a non-System mode).
 2. Compiles the freestanding aarch64 binary to `out/jbm_init` and rejects any
    undefined symbol.
 3. Unpacks `boot.img`, renames `init` to `init.system`, adds the menu as `init`,
@@ -95,15 +121,33 @@ JBM_AUTOBOOT_SEC=10 JBM_VERSION=1.1 ./build.sh
 python3 tools/gen_font.py     # rewrites src/jbm_font.h, needs Pillow
 ```
 
+The font is ASCII only (32..126); middle dots in the UI are drawn as discs.
+
+## Regenerating the planet art
+
+The planet slices are rendered from the layout mocks `jbtest.html` (menu) and
+`jbbootingtest.html` (boot screen), which are the source of truth for position
+and styling:
+
+```sh
+python3 tools/gen_planet.py   # needs Inkscape + Pillow
+```
+
+It rewrites `src/jbm_planet_menu.h` and `src/jbm_planet_boot.h`.
+
 ## Layout
 
 ```
-src/jbm_menu.c   menu, UI, framebuffer, touch and reboot
-src/start.S      aarch64 entry point that normalises argc/argv/envp
-src/jbm_font.h   generated 8-bit alpha font atlases (committed)
+src/jbm_menu.c        menu, UI, framebuffer, touch and reboot
+src/start.S           aarch64 entry point that normalises argc/argv/envp
+src/jbm_font.h        generated 8-bit alpha font atlases (committed)
+src/jbm_planet_*.h    generated planet slices (committed)
 tools/gen_font.py
-build.sh         build + inject + verify, never flashes
-out/             build artifacts (jbm_init, boot-jbm.img, previews, staging)
+tools/gen_planet.py
+jbtest.html           menu mock (layout source of truth)
+jbbootingtest.html    boot-screen mock (layout source of truth)
+build.sh              build + inject + verify, never flashes
+out/                  build artifacts (jbm_init, boot-jbm.img, previews, staging)
 ```
 
 ## Untested
