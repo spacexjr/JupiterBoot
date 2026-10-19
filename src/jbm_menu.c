@@ -16,7 +16,121 @@ typedef uint64_t u64;
 typedef int64_t i64;
 typedef int32_t i32;
 
+#ifndef NULL
 #define NULL ((void *)0)
+#endif
+
+/* Configuration system: files live under /cache/Jupiter (mounted at runtime),
+ * with /Jupiter inside the ramdisk as a fallback root. JBM_ROOT is set once
+ * during startup to whichever root actually holds config/entries files. */
+#define JBM_CONFIG_DIR "/cache/Jupiter"
+#define JBM_RAMDISK_DIR "/Jupiter"
+#define JBM_MAX_ENTRIES 32
+#define JBM_MAX_ENTRY_NAME 64
+#define JBM_MAX_ENTRY_PATH 256
+#define JBM_MAX_ENTRY_ARGS 256
+#define JBM_MAX_THEME_NAME 32
+#define JBM_MAX_CONFIG_VALUE 256
+
+typedef enum {
+    JBM_ENTRY_TYPE_SYSTEM = 0,
+    JBM_ENTRY_TYPE_RECOVERY,
+    JBM_ENTRY_TYPE_FASTBOOT,
+    JBM_ENTRY_TYPE_DOWNLOAD,
+    JBM_ENTRY_TYPE_REBOOT,
+    JBM_ENTRY_TYPE_POWEROFF,
+    JBM_ENTRY_TYPE_SCRIPT,
+    JBM_ENTRY_TYPE_BINARY,
+} jbm_entry_type_t;
+
+typedef struct {
+    char id[32];
+    char name[JBM_MAX_ENTRY_NAME];
+    jbm_entry_type_t type;
+    char path[JBM_MAX_ENTRY_PATH];
+    char args[JBM_MAX_ENTRY_ARGS];
+    int enabled;
+    int order;
+    int is_default;
+    /* 0: return to the menu after a script/binary finishes (default)
+     * 1: chain to the real init    2: reboot */
+    int behavior_after;
+} jbm_entry_t;
+
+/* Bits for jbm_config_t.mask: keys that were explicitly present in
+ * config.ini. Only those override the theme when the layers are merged. */
+#define JBM_K_COLOR_BG 0x0001u
+#define JBM_K_COLOR_FG 0x0002u
+#define JBM_K_COLOR_BORDER 0x0004u
+#define JBM_K_COLOR_HL 0x0008u
+#define JBM_K_COLOR_TEXT 0x0010u
+#define JBM_K_COLOR_TEXTSEL 0x0020u
+#define JBM_K_COLOR_ACCENT 0x0040u
+#define JBM_K_BTN_W 0x0080u
+#define JBM_K_BTN_H 0x0100u
+#define JBM_K_BTN_GAP 0x0200u
+#define JBM_K_BTN_R 0x0400u
+#define JBM_K_TEXT_SIZE 0x0800u
+
+typedef struct {
+    u32 mask; /* JBM_K_* bits set by keys found in config.ini */
+    char background_path[JBM_MAX_CONFIG_VALUE];
+    char theme_name[JBM_MAX_THEME_NAME];
+    int button_style;
+    u32 color_bg;
+    u32 color_fg;
+    u32 color_border;
+    u32 color_highlight;
+    u32 color_text;
+    u32 color_text_sel;
+    u32 color_accent;
+    int button_width;
+    int button_height;
+    int button_spacing;
+    int button_radius;
+    int text_size;
+    int menu_timeout_sec;
+    int default_entry; /* index into the entry list, -1 = use entry flag */
+    int show_countdown;
+    int show_brand;
+    int orientation; /* 0/90/180/270, -1 = auto (fb var.rotate * 90) */
+    char input_device[JBM_MAX_CONFIG_VALUE];
+    int touch_cal_x0, touch_cal_y0, touch_cal_x1, touch_cal_y1;
+    int prefer_drm;
+    int fallback_to_fb;
+    int log_level;
+    int log_file;
+} jbm_config_t;
+
+typedef struct {
+    char name[JBM_MAX_THEME_NAME];
+    int button_style;
+    u32 color_bg;
+    u32 color_fg;
+    u32 color_border;
+    u32 color_highlight;
+    u32 color_text;
+    u32 color_text_sel;
+    u32 color_accent;
+    int button_width;
+    int button_height;
+    int button_spacing;
+    int button_radius;
+    int button_border_width;
+    int text_size;
+} jbm_theme_t;
+
+static jbm_config_t JBM_CFG;
+static jbm_theme_t JBM_FX; /* theme merged with config overrides: what UI paints with */
+static jbm_entry_t JBM_ENTRIES[JBM_MAX_ENTRIES];
+static int JBM_NUM_ENTRIES = 0;
+static char JBM_ROOT[64] = JBM_CONFIG_DIR;
+static int JBM_CACHE_MOUNTED = 0; /* we mounted /cache and must unmount it again */
+#ifndef JBM_HOST
+static int JBM_CACHE_READY = 0;   /* /cache (or the ramdisk root) is usable for config */
+#endif
+static int JBM_CFG_WRITABLE = 0;  /* may create <JBM_ROOT>/... on this boot */
+
 #define AT_FDCWD (-100)
 
 struct jbm_timespec {
@@ -82,6 +196,7 @@ static int jbm_mmap_err = 0;
 #include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <linux/fb.h>
@@ -114,6 +229,24 @@ static i64 hs_now_ms(void) {
     return (i64)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 static void hs_sleep_ms(u32 ms) { usleep(ms * 1000); }
+static int hs_fchmod(const char *p, int m) { return chmod(p, (mode_t)m); }
+static int hs_rename(const char *a, const char *b) { return rename(a, b); }
+static int jbm_atoi_(const char *s) { return atoi(s); }
+static i64 hs_lseek(int fd, i64 off, int whence) { return (i64)lseek(fd, (off_t)off, whence); }
+static void hs_release(void *p, u32 len) {
+    (void)len;
+    free(p);
+}
+static i64 hs_fork(void) {
+    pid_t p = fork();
+    return (i64)p;
+}
+static int hs_wait(i64 pid, int *status) {
+    int st = 0;
+    pid_t r = (pid_t)waitpid((pid_t)pid, &st, 0);
+    if (status) *status = st;
+    return r < 0 ? -1 : (st >> 8) & 0xFF;
+}
 static i64 hs_reboot_cmd(int cmd, int sub) {
     static const char *const names[] = {"restart", "bootloader", "power off", "download", "recovery"};
     if (cmd >= 0 && cmd < 5) fprintf(stderr, "[jbm:host] would reboot: %s\n", names[cmd]);
@@ -138,14 +271,22 @@ static i64 hs_reboot_cmd(int cmd, int sub) {
 #define jbm_now_ms hs_now_ms
 #define jbm_sleep_ms hs_sleep_ms
 #define jbm_reboot_cmd hs_reboot_cmd
+#define jbm_fchmod hs_fchmod
+#define jbm_rename hs_rename
+#define jbm_fork hs_fork
+#define jbm_wait hs_wait
+#define jbm_lseek hs_lseek
+#define jbm_release hs_release
 
 #else /* freestanding aarch64 */
 
 #define SYS_ioctl 29
+#define SYS_renameat 38
 #define SYS_mknodat 33
 #define SYS_mkdirat 34
 #define SYS_umount2 39
 #define SYS_mount 40
+#define SYS_fchmodat 53
 #define SYS_openat 56
 #define SYS_close 57
 #define SYS_getdents64 61
@@ -159,10 +300,12 @@ static i64 hs_reboot_cmd(int cmd, int sub) {
 #define SYS_clock_gettime 113
 #define SYS_sched_yield 124
 #define SYS_reboot 142
+#define SYS_clone 220
 #define SYS_munmap 215
-#define SYS_syncfs 267
 #define SYS_execve 221
 #define SYS_mmap 222
+#define SYS_wait4 260
+#define SYS_syncfs 267
 
 #define O_RDONLY 0
 #define O_WRONLY 1
@@ -170,7 +313,11 @@ static i64 hs_reboot_cmd(int cmd, int sub) {
 #define O_CREAT 64
 #define O_EXCL 128
 #define O_TRUNC 512
+#define O_APPEND 1024
 #define O_NONBLOCK 2048
+#define O_DIRECTORY 65536
+
+#define SIGCHLD 17
 
 #define SEEK_SET 0
 #define SEEK_END 2
@@ -203,6 +350,9 @@ static i64 hs_reboot_cmd(int cmd, int sub) {
 
 #ifndef S_IFCHR
 #define S_IFCHR 0020000
+#endif
+#ifndef S_IFBLK
+#define S_IFBLK 0060000
 #endif
 
 #define _IOC(dir, type, nr, size) (((dir) << 30) | ((size) << 16) | ((type) << 8) | (nr))
@@ -299,6 +449,38 @@ static i64 jbm_reboot_cmd(int cmd, int sub) {
     }
 }
 
+/* Best-effort chmod so a freshly pushed script/binary becomes executable. */
+static int jbm_fchmod(const char *p, int m) { return (int)sc4(SYS_fchmodat, AT_FDCWD, (long)p, (long)m, 0); }
+
+/* renameat(2): aarch64 has no rename(2); both paths are CWD-relative. Returns 0
+ * or a negative errno. Used for atomic temp-file writes. */
+static int jbm_rename(const char *a, const char *b) {
+    return (int)sc4(SYS_renameat, AT_FDCWD, (long)a, AT_FDCWD, (long)b);
+}
+
+/* fork(2) on aarch64 is clone(SIGCHLD, 0, 0, 0, 0). 0 in the child, pid in the
+ * parent, negative error otherwise. */
+static i64 jbm_fork(void) { return sc5(SYS_clone, SIGCHLD, 0, 0, 0, 0); }
+
+/* Blocking wait4; returns the exit code (0..255) or -1 if the child was
+ * signalled / wait failed. */
+static int jbm_wait(i64 pid, int *status) {
+    int st = 0;
+    i64 r = sc4(SYS_wait4, pid, (long)&st, 0, 0);
+    if (status) *status = st;
+    if (r < 0) return -1;
+    if (st & 0x7F) return -1; /* killed by a signal */
+    return (st >> 8) & 0xFF;
+}
+
+static i64 jbm_lseek(int fd, i64 off, int whence) { return sc3(SYS_lseek, fd, off, whence); }
+
+/* Anonymous mappings (and the fb mapping) are released here. For the fb the
+ * caller already tracked the length; anonymous buffers pass their own. */
+static void jbm_release(void *p, u32 len) {
+    if (p && len) sc2(SYS_munmap, (long)p, len);
+}
+
 #endif /* JBM_HOST */
 
 struct jbm_pollfd {
@@ -375,6 +557,9 @@ void *memset(void *d, int c, unsigned long n);
 void *memcpy(void *d, const void *s, unsigned long n);
 void *memmove(void *d, const void *s, unsigned long n);
 int memcmp(const void *a, const void *b, unsigned long n);
+unsigned long strlen(const char *s);
+int strcmp(const char *a, const char *b);
+char *strchr(const char *s, int c);
 #endif
 
 void *memset(void *d, int c, unsigned long n) {
@@ -423,6 +608,29 @@ int memcmp(const void *a, const void *b, unsigned long n) {
     }
     return 0;
 }
+
+#ifndef JBM_HOST
+unsigned long strlen(const char *s) {
+    unsigned long n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+int strcmp(const char *a, const char *b) {
+    while (*a && *a == *b) {
+        a++;
+        b++;
+    }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
+char *strchr(const char *s, int c) {
+    for (;; s++) {
+        if (*s == (char)c) return (char *)s;
+        if (!*s) return 0;
+    }
+}
+#endif
 
 static int jbm_str_has(const char *hay, const char *needle) {
     if (!*needle) return 1;
@@ -503,15 +711,54 @@ static int jbm_vfmt(char *out, const char *fmt, va_list ap) {
         while (*fmt >= '0' && *fmt <= '9') {
             pad = pad * 10 + (u32)(*fmt++ - '0');
         }
-        while (*fmt == 'l' || *fmt == 'z' || *fmt == 'j' || *fmt == 'h') fmt++;
+        int lng = 0; /* 'l'/'ll' asks for a 64-bit argument */
+        while (*fmt == 'l' || *fmt == 'z' || *fmt == 'j' || *fmt == 'h') {
+            if (*fmt == 'l') lng++;
+            fmt++;
+        }
         switch (*fmt++) {
+            case 'x':
+            case 'X': {
+                unsigned long long x = lng ? va_arg(ap, unsigned long long)
+                                           : (unsigned long long)va_arg(ap, unsigned int);
+                char t[24];
+                int m = 0;
+                if (!x) t[m++] = '0';
+                const char *hex = (fmt[-1] == 'X') ? "0123456789ABCDEF" : "0123456789abcdef";
+                while (x) {
+                    t[m++] = hex[x & 0xF];
+                    x >>= 4;
+                }
+                for (u32 k = (u32)m; k < pad; k++) *o++ = padc;
+                for (int i = m - 1; i >= 0; i--) *o++ = t[i];
+                break;
+            }
+            case 'p': {
+                unsigned long pxv = (unsigned long)va_arg(ap, void *);
+                char t[32];
+                int m = 0;
+                if (!pxv) t[m++] = '0';
+                const char *hex = "0123456789abcdef";
+                while (pxv) {
+                    t[m++] = hex[pxv & 0xF];
+                    pxv >>= 4;
+                }
+                for (u32 k = (u32)m; k < pad; k++) *o++ = padc;
+                for (int i = m - 1; i >= 0; i--) *o++ = t[i];
+                break;
+            }
             case 'd':
-            case 'i':
-                o = jbm_fmtd(o, va_arg(ap, i64), pad, padc);
+            case 'i': {
+                i64 dv = lng ? va_arg(ap, i64) : (i64)va_arg(ap, int);
+                o = jbm_fmtd(o, dv, pad, padc);
                 break;
-            case 'u':
-                o = jbm_fmtd(o, (i64)va_arg(ap, unsigned int), pad, padc);
+            }
+            case 'u': {
+                i64 uv = lng ? (i64)va_arg(ap, unsigned long long)
+                             : (i64)va_arg(ap, unsigned int);
+                o = jbm_fmtd(o, uv, pad, padc);
                 break;
+            }
             case 's': {
                 const char *s = va_arg(ap, const char *);
                 if (!s) s = "(null)";
@@ -544,6 +791,9 @@ static int jbm_sn(char *out, const char *fmt, ...) {
 static int jbm_klog_fd = -1;
 static int jbm_kmsg_err = 0;
 static int jbm_con_err = 0;
+/* Optional second sink: <config root>/boot.log, opened once a config root is
+ * known. Best effort: writing fails silently when /cache is not writable. */
+static int jbm_log_fd = -1;
 
 static void jbm_log(const char *fmt, ...) {
     char b[512];
@@ -578,6 +828,10 @@ static void jbm_log(const char *fmt, ...) {
         jbm_write(jbm_klog_fd, l, (u32)n);
     else
         jbm_write(1, l, (u32)n); /* stdout only when kmsg is unavailable */
+    if (jbm_log_fd >= 0) {
+        jbm_write(jbm_log_fd, b, strlen(b));
+        jbm_write(jbm_log_fd, "\n", 1);
+    }
 }
 
 #ifndef JBM_HOST
@@ -607,8 +861,1200 @@ static void jbm_sync_all(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* INI configuration parser                                           */
+/* ------------------------------------------------------------------ */
+
+static void jbm_trim(char *s) {
+    char *start = s;
+    while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n') start++;
+    char *end = s + strlen(s) - 1;
+    while (end > start && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) *end-- = 0;
+    if (start != s) memmove(s, start, strlen(start) + 1);
+}
+
+/* "#RRGGBB", "0xRRGGBB" or "RRGGBB"; returns opaque ARGB, or 0 when invalid
+ * (a parsed colour always carries an alpha of 0xFF, so it is never 0). */
+static u32 jbm_parse_color(const char *s) {
+    if (!s || !*s) return 0;
+    jbm_trim((char *)s);
+    if (s[0] == '#') s++;
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+    unsigned int val = 0;
+    int n = 0;
+    for (int i = 0; s[i] && i < 8; i++) {
+        char c = s[i];
+        unsigned int v = 0;
+        if (c >= '0' && c <= '9') v = (unsigned int)(c - '0');
+        else if (c >= 'a' && c <= 'f') v = (unsigned int)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v = (unsigned int)(c - 'A' + 10);
+        else break;
+        val = (val << 4) | v;
+        n++;
+    }
+    if (n == 0) return 0;
+    if (n <= 6) val |= 0xFF000000u;
+    return (u32)val;
+}
+
+static int jbm_parse_bool(const char *s) {
+    if (!s) return 0;
+    jbm_trim((char *)s);
+    return (s[0] == '1' || s[0] == 't' || s[0] == 'T' || s[0] == 'y' || s[0] == 'Y' ||
+            s[0] == 'o' || s[0] == 'O');
+}
+
+static int jbm_parse_int(const char *s, int def) {
+    if (!s || !*s) return def;
+    jbm_trim((char *)s);
+    return jbm_atoi_(s);
+}
+
+/* Portable whole-file slurp. Returns 0/-1. */
+static int jbm_read_text(const char *path, char *buf, u32 cap) {
+    int fd = jbm_open(path, O_RDONLY, 0);
+    if (fd < 0) return -1;
+    long n = jbm_read(fd, buf, cap - 1);
+    jbm_close(fd);
+    if (n < 0) return -1;
+    if (n > (long)cap - 1) n = (long)cap - 1;
+    buf[n] = 0;
+    return 0;
+}
+
+static int jbm_exists(const char *path) {
+    int fd = jbm_open(path, O_RDONLY, 0);
+    if (fd < 0) return 0;
+    jbm_close(fd);
+    return 1;
+}
+
+static void jbm_set_default_config(jbm_config_t *cfg) {
+    memset(cfg, 0, sizeof(*cfg));
+    jbm_strcpy_(cfg->theme_name, "default", sizeof(cfg->theme_name));
+    cfg->mask = 0;
+    cfg->color_bg = 0xFF020202;
+    cfg->color_fg = 0xFF20242C;
+    cfg->color_border = 0xFFD88A4E;
+    cfg->color_highlight = 0xFFB86837;
+    cfg->color_text = 0xFF858585;
+    cfg->color_text_sel = 0xFFFFFFFF;
+    cfg->color_accent = 0xFFC87335;
+    cfg->button_width = 430;
+    cfg->button_height = 94;
+    cfg->button_spacing = 12;
+    cfg->button_radius = 7;
+    cfg->text_size = 19;
+    cfg->menu_timeout_sec = JBM_AUTOBOOT_SEC;
+    cfg->default_entry = -1;
+    cfg->show_countdown = 1;
+    cfg->show_brand = 1;
+    cfg->orientation = 0;
+    cfg->input_device[0] = 0;
+    cfg->touch_cal_x0 = cfg->touch_cal_y0 = cfg->touch_cal_x1 = cfg->touch_cal_y1 = -1;
+    cfg->prefer_drm = 0;
+    cfg->fallback_to_fb = 1;
+    cfg->log_level = 6;
+    cfg->log_file = 1;
+    /* background_path is filled in after the config root is known. */
+}
+
+static void jbm_set_default_theme(jbm_theme_t *theme) {
+    memset(theme, 0, sizeof(*theme));
+    jbm_strcpy_(theme->name, "default", sizeof(theme->name));
+    theme->button_style = 0;
+    theme->color_bg = 0xFF020202;
+    theme->color_fg = 0xFF20242C;
+    theme->color_border = 0xFFD88A4E;
+    theme->color_highlight = 0xFFB86837;
+    theme->color_text = 0xFF858585;
+    theme->color_text_sel = 0xFFFFFFFF;
+    theme->color_accent = 0xFFC87335;
+    theme->button_width = 430;
+    theme->button_height = 94;
+    theme->button_spacing = 12;
+    theme->button_radius = 7;
+    theme->button_border_width = 1;
+    theme->text_size = 19;
+}
+
+/* Splits "key = value" out of a line; returns 0 when a key was found. */
+static int jbm_split_kv(const char *line, char *key, u32 kcap, char *val, u32 vcap) {
+    const char *eq = strchr(line, '=');
+    if (!eq) return -1;
+    int keylen = (int)(eq - line);
+    if (keylen >= (int)kcap) keylen = (int)kcap - 1;
+    memcpy(key, line, (u32)keylen);
+    key[keylen] = 0;
+    jbm_trim(key);
+    jbm_strcpy_(val, eq + 1, vcap);
+    jbm_trim(val);
+    return 0;
+}
+
+static void jbm_parse_config_line(const char *line, jbm_config_t *cfg) {
+    char key[128], val[160];
+    if (jbm_split_kv(line, key, sizeof(key), val, sizeof(val)) != 0) return;
+
+    if (strcmp(key, "background") == 0) jbm_strcpy_(cfg->background_path, val, sizeof(cfg->background_path));
+    else if (strcmp(key, "theme") == 0) jbm_strcpy_(cfg->theme_name, val, sizeof(cfg->theme_name));
+    else if (strcmp(key, "button_style") == 0) cfg->button_style = jbm_parse_int(val, cfg->button_style);
+    else if (strcmp(key, "color_bg") == 0) { u32 c = jbm_parse_color(val); if (c) { cfg->color_bg = (u32)c; cfg->mask |= JBM_K_COLOR_BG; } }
+    else if (strcmp(key, "color_fg") == 0) { u32 c = jbm_parse_color(val); if (c) { cfg->color_fg = (u32)c; cfg->mask |= JBM_K_COLOR_FG; } }
+    else if (strcmp(key, "color_border") == 0) { u32 c = jbm_parse_color(val); if (c) { cfg->color_border = (u32)c; cfg->mask |= JBM_K_COLOR_BORDER; } }
+    else if (strcmp(key, "color_highlight") == 0) { u32 c = jbm_parse_color(val); if (c) { cfg->color_highlight = (u32)c; cfg->mask |= JBM_K_COLOR_HL; } }
+    else if (strcmp(key, "color_text") == 0) { u32 c = jbm_parse_color(val); if (c) { cfg->color_text = (u32)c; cfg->mask |= JBM_K_COLOR_TEXT; } }
+    else if (strcmp(key, "color_text_sel") == 0) { u32 c = jbm_parse_color(val); if (c) { cfg->color_text_sel = (u32)c; cfg->mask |= JBM_K_COLOR_TEXTSEL; } }
+    else if (strcmp(key, "color_accent") == 0) { u32 c = jbm_parse_color(val); if (c) { cfg->color_accent = (u32)c; cfg->mask |= JBM_K_COLOR_ACCENT; } }
+    else if (strcmp(key, "button_width") == 0) { cfg->button_width = jbm_parse_int(val, cfg->button_width); cfg->mask |= JBM_K_BTN_W; }
+    else if (strcmp(key, "button_height") == 0) { cfg->button_height = jbm_parse_int(val, cfg->button_height); cfg->mask |= JBM_K_BTN_H; }
+    else if (strcmp(key, "button_spacing") == 0) { cfg->button_spacing = jbm_parse_int(val, cfg->button_spacing); cfg->mask |= JBM_K_BTN_GAP; }
+    else if (strcmp(key, "button_radius") == 0) { cfg->button_radius = jbm_parse_int(val, cfg->button_radius); cfg->mask |= JBM_K_BTN_R; }
+    else if (strcmp(key, "text_size") == 0) { cfg->text_size = jbm_parse_int(val, cfg->text_size); cfg->mask |= JBM_K_TEXT_SIZE; }
+    else if (strcmp(key, "menu_timeout_sec") == 0) cfg->menu_timeout_sec = jbm_parse_int(val, cfg->menu_timeout_sec);
+    else if (strcmp(key, "default_entry") == 0) cfg->default_entry = jbm_parse_int(val, cfg->default_entry);
+    else if (strcmp(key, "show_countdown") == 0) cfg->show_countdown = jbm_parse_bool(val);
+    else if (strcmp(key, "show_brand") == 0) cfg->show_brand = jbm_parse_bool(val);
+    else if (strcmp(key, "orientation") == 0) {
+        if (strcmp(val, "auto") == 0) cfg->orientation = -1;
+        else {
+            int o = jbm_parse_int(val, cfg->orientation);
+            if (o == 1 || o == 2 || o == 3) o *= 90; /* quarter turns accepted too */
+            cfg->orientation = o;
+        }
+    }
+    else if (strcmp(key, "input_device") == 0) jbm_strcpy_(cfg->input_device, val, sizeof(cfg->input_device));
+    else if (strcmp(key, "touch_cal_x0") == 0) cfg->touch_cal_x0 = jbm_parse_int(val, cfg->touch_cal_x0);
+    else if (strcmp(key, "touch_cal_y0") == 0) cfg->touch_cal_y0 = jbm_parse_int(val, cfg->touch_cal_y0);
+    else if (strcmp(key, "touch_cal_x1") == 0) cfg->touch_cal_x1 = jbm_parse_int(val, cfg->touch_cal_x1);
+    else if (strcmp(key, "touch_cal_y1") == 0) cfg->touch_cal_y1 = jbm_parse_int(val, cfg->touch_cal_y1);
+    else if (strcmp(key, "prefer_drm") == 0) cfg->prefer_drm = jbm_parse_bool(val);
+    else if (strcmp(key, "fallback_to_fb") == 0) cfg->fallback_to_fb = jbm_parse_bool(val);
+    else if (strcmp(key, "log_level") == 0) cfg->log_level = jbm_parse_int(val, cfg->log_level);
+    else if (strcmp(key, "log_file") == 0) cfg->log_file = jbm_parse_bool(val);
+}
+
+/* Applies every "key = value" of an INI buffer, ignoring sections/comments. */
+static void jbm_foreach_kv(char *buf, void (*fn)(const char *, void *), void *ud) {
+    char *line = buf;
+    while (*line) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        jbm_trim(line);
+        if (*line && *line != '#' && *line != ';' && *line != '[') fn(line, ud);
+        if (nl) line = nl + 1;
+        else break;
+    }
+}
+
+static void jbm_cfg_kv_cb(const char *line, void *ud) { jbm_parse_config_line(line, (jbm_config_t *)ud); }
+static void jbm_parse_theme_line(const char *line, jbm_theme_t *theme);
+static void jbm_theme_kv_cb(const char *line, void *ud) { jbm_parse_theme_line(line, (jbm_theme_t *)ud); }
+
+static void jbm_load_config(jbm_config_t *cfg) {
+    jbm_set_default_config(cfg);
+    char buf[8192];
+    char path[192];
+    jbm_sn(path, "%s/config.ini", JBM_ROOT);
+    if (jbm_read_text(path, buf, sizeof(buf)) == 0) {
+        jbm_foreach_kv(buf, jbm_cfg_kv_cb, cfg);
+        jbm_log("jbm: loaded config from %s", path);
+    } else {
+        jbm_log("jbm: no config at %s, using defaults", path);
+    }
+}
+
+static void jbm_parse_theme_line(const char *line, jbm_theme_t *theme) {
+    char key[128], val[160];
+    if (jbm_split_kv(line, key, sizeof(key), val, sizeof(val)) != 0) return;
+
+    if (strcmp(key, "button_style") == 0) theme->button_style = jbm_parse_int(val, theme->button_style);
+    else if (strcmp(key, "color_bg") == 0) { u32 c = jbm_parse_color(val); if (c) theme->color_bg = (u32)c; }
+    else if (strcmp(key, "color_fg") == 0) { u32 c = jbm_parse_color(val); if (c) theme->color_fg = (u32)c; }
+    else if (strcmp(key, "color_border") == 0) { u32 c = jbm_parse_color(val); if (c) theme->color_border = (u32)c; }
+    else if (strcmp(key, "color_highlight") == 0) { u32 c = jbm_parse_color(val); if (c) theme->color_highlight = (u32)c; }
+    else if (strcmp(key, "color_text") == 0) { u32 c = jbm_parse_color(val); if (c) theme->color_text = (u32)c; }
+    else if (strcmp(key, "color_text_sel") == 0) { u32 c = jbm_parse_color(val); if (c) theme->color_text_sel = (u32)c; }
+    else if (strcmp(key, "color_accent") == 0) { u32 c = jbm_parse_color(val); if (c) theme->color_accent = (u32)c; }
+    else if (strcmp(key, "button_width") == 0) theme->button_width = jbm_parse_int(val, theme->button_width);
+    else if (strcmp(key, "button_height") == 0) theme->button_height = jbm_parse_int(val, theme->button_height);
+    else if (strcmp(key, "button_spacing") == 0) theme->button_spacing = jbm_parse_int(val, theme->button_spacing);
+    else if (strcmp(key, "button_radius") == 0) theme->button_radius = jbm_parse_int(val, theme->button_radius);
+    else if (strcmp(key, "button_border_width") == 0) theme->button_border_width = jbm_parse_int(val, theme->button_border_width);
+    else if (strcmp(key, "text_size") == 0) theme->text_size = jbm_parse_int(val, theme->text_size);
+}
+
+/* Merges <root>/themes/<name>.ini over an already-initialised theme. */
+static int jbm_load_theme_file(const char *name, jbm_theme_t *theme) {
+    char path[192];
+    jbm_sn(path, "%s/themes/%s.ini", JBM_ROOT, name);
+    char buf[4096];
+    if (jbm_read_text(path, buf, sizeof(buf)) != 0) {
+        jbm_log("jbm: theme %s not found at %s, keeping base theme", name, path);
+        return -1;
+    }
+    jbm_foreach_kv(buf, jbm_theme_kv_cb, theme);
+    jbm_strcpy_(theme->name, name, sizeof(theme->name));
+    jbm_log("jbm: loaded theme %s from %s", name, path);
+    return 0;
+}
+
+/* Theme file first, then only the config colours/metrics that were set. */
+static void jbm_build_effects(void) {
+    jbm_set_default_theme(&JBM_FX);
+    if (JBM_CFG.theme_name[0]) jbm_load_theme_file(JBM_CFG.theme_name, &JBM_FX);
+    if (JBM_CFG.mask & JBM_K_COLOR_BG) JBM_FX.color_bg = JBM_CFG.color_bg;
+    if (JBM_CFG.mask & JBM_K_COLOR_FG) JBM_FX.color_fg = JBM_CFG.color_fg;
+    if (JBM_CFG.mask & JBM_K_COLOR_BORDER) JBM_FX.color_border = JBM_CFG.color_border;
+    if (JBM_CFG.mask & JBM_K_COLOR_HL) JBM_FX.color_highlight = JBM_CFG.color_highlight;
+    if (JBM_CFG.mask & JBM_K_COLOR_TEXT) JBM_FX.color_text = JBM_CFG.color_text;
+    if (JBM_CFG.mask & JBM_K_COLOR_TEXTSEL) JBM_FX.color_text_sel = JBM_CFG.color_text_sel;
+    if (JBM_CFG.mask & JBM_K_COLOR_ACCENT) JBM_FX.color_accent = JBM_CFG.color_accent;
+    if (JBM_CFG.mask & JBM_K_BTN_W) JBM_FX.button_width = JBM_CFG.button_width;
+    if (JBM_CFG.mask & JBM_K_BTN_H) JBM_FX.button_height = JBM_CFG.button_height;
+    if (JBM_CFG.mask & JBM_K_BTN_GAP) JBM_FX.button_spacing = JBM_CFG.button_spacing;
+    if (JBM_CFG.mask & JBM_K_BTN_R) JBM_FX.button_radius = JBM_CFG.button_radius;
+    if (JBM_CFG.mask & JBM_K_TEXT_SIZE) JBM_FX.text_size = JBM_CFG.text_size;
+    jbm_log("jbm: effects bg=%08x accent=%08x hl=%08x text=%08x", JBM_FX.color_bg,
+            JBM_FX.color_accent, JBM_FX.color_highlight, JBM_FX.color_text);
+}
+
+static jbm_entry_type_t jbm_parse_entry_type(const char *s) {
+    if (!s) return JBM_ENTRY_TYPE_SYSTEM;
+    if (strcmp(s, "system") == 0) return JBM_ENTRY_TYPE_SYSTEM;
+    if (strcmp(s, "recovery") == 0) return JBM_ENTRY_TYPE_RECOVERY;
+    if (strcmp(s, "fastboot") == 0) return JBM_ENTRY_TYPE_FASTBOOT;
+    if (strcmp(s, "download") == 0) return JBM_ENTRY_TYPE_DOWNLOAD;
+    if (strcmp(s, "reboot") == 0) return JBM_ENTRY_TYPE_REBOOT;
+    if (strcmp(s, "poweroff") == 0) return JBM_ENTRY_TYPE_POWEROFF;
+    if (strcmp(s, "script") == 0) return JBM_ENTRY_TYPE_SCRIPT;
+    if (strcmp(s, "binary") == 0) return JBM_ENTRY_TYPE_BINARY;
+    return JBM_ENTRY_TYPE_SYSTEM;
+}
+
+static void jbm_parse_entry_line(const char *line, jbm_entry_t *entry) {
+    char key[128], val[256];
+    if (jbm_split_kv(line, key, sizeof(key), val, sizeof(val)) != 0) return;
+
+    if (strcmp(key, "name") == 0) jbm_strcpy_(entry->name, val, sizeof(entry->name));
+    else if (strcmp(key, "type") == 0) entry->type = jbm_parse_entry_type(val);
+    else if (strcmp(key, "path") == 0) jbm_strcpy_(entry->path, val, sizeof(entry->path));
+    else if (strcmp(key, "args") == 0) jbm_strcpy_(entry->args, val, sizeof(entry->args));
+    else if (strcmp(key, "enabled") == 0) entry->enabled = jbm_parse_bool(val);
+    else if (strcmp(key, "order") == 0) entry->order = jbm_parse_int(val, entry->order);
+    else if (strcmp(key, "default") == 0) entry->is_default = jbm_parse_bool(val);
+    else if (strcmp(key, "behavior_after") == 0) entry->behavior_after = jbm_parse_int(val, entry->behavior_after);
+}
+
+static jbm_entry_t jbm_entry_tmp;
+static void jbm_load_entries(void) {
+    JBM_NUM_ENTRIES = 0;
+    char buf[16384];
+    char path[192];
+    jbm_sn(path, "%s/entries.ini", JBM_ROOT);
+    if (jbm_read_text(path, buf, sizeof(buf)) != 0) {
+        jbm_log("jbm: no entries at %s, using built-in entries", path);
+        return;
+    }
+
+    jbm_entry_t *cur = NULL;
+    char *line = buf;
+    while (*line) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        jbm_trim(line);
+        if (line[0] == '[') {
+            /* flush the previous section */
+            if (cur && cur->enabled && JBM_NUM_ENTRIES < JBM_MAX_ENTRIES)
+                JBM_ENTRIES[JBM_NUM_ENTRIES++] = *cur;
+            cur = &jbm_entry_tmp;
+            memset(cur, 0, sizeof(*cur));
+            cur->enabled = 1;
+            cur->order = JBM_NUM_ENTRIES;
+            char *end = strchr(line + 1, ']');
+            if (end) *end = 0;
+            jbm_strcpy_(cur->id, line + 1, sizeof(cur->id));
+        } else if (*line && cur) {
+            jbm_parse_entry_line(line, cur);
+        }
+        if (nl) line = nl + 1;
+        else break;
+    }
+    if (cur && cur->enabled && JBM_NUM_ENTRIES < JBM_MAX_ENTRIES)
+        JBM_ENTRIES[JBM_NUM_ENTRIES++] = *cur;
+
+    for (int i = 0; i < JBM_NUM_ENTRIES - 1; i++)
+        for (int j = i + 1; j < JBM_NUM_ENTRIES; j++)
+            if (JBM_ENTRIES[i].order > JBM_ENTRIES[j].order) {
+                jbm_entry_t tmp = JBM_ENTRIES[i];
+                JBM_ENTRIES[i] = JBM_ENTRIES[j];
+                JBM_ENTRIES[j] = tmp;
+            }
+
+    jbm_log("jbm: loaded %d entries from %s", JBM_NUM_ENTRIES, path);
+}
+
+/* The six rows used both when entries.ini is missing and as the content of the
+ * default entries.ini generated on first boot. Keep the two in sync. */
+struct jbm_builtin_entry {
+    const char *id;
+    const char *name;
+    jbm_entry_type_t type;
+};
+static const struct jbm_builtin_entry JBM_BUILTINS[] = {
+    {"system", "System", JBM_ENTRY_TYPE_SYSTEM},
+    {"recovery", "Recovery", JBM_ENTRY_TYPE_RECOVERY},
+    {"fastboot", "Fastboot", JBM_ENTRY_TYPE_FASTBOOT},
+    {"download", "Download", JBM_ENTRY_TYPE_DOWNLOAD},
+    {"reboot", "Reboot", JBM_ENTRY_TYPE_REBOOT},
+    {"poweroff", "Power off", JBM_ENTRY_TYPE_POWEROFF},
+};
+#define JBM_NUM_BUILTINS ((int)(sizeof(JBM_BUILTINS) / sizeof(JBM_BUILTINS[0])))
+
+static const char *jbm_entry_type_name(jbm_entry_type_t t) {
+    switch (t) {
+        case JBM_ENTRY_TYPE_RECOVERY: return "recovery";
+        case JBM_ENTRY_TYPE_FASTBOOT: return "fastboot";
+        case JBM_ENTRY_TYPE_DOWNLOAD: return "download";
+        case JBM_ENTRY_TYPE_REBOOT: return "reboot";
+        case JBM_ENTRY_TYPE_POWEROFF: return "poweroff";
+        case JBM_ENTRY_TYPE_SCRIPT: return "script";
+        case JBM_ENTRY_TYPE_BINARY: return "binary";
+        default: return "system";
+    }
+}
+
+static void jbm_ensure_default_entries(void) {
+    if (JBM_NUM_ENTRIES > 0) return;
+    for (int i = 0; i < JBM_NUM_BUILTINS; i++) {
+        jbm_entry_t *e = &JBM_ENTRIES[JBM_NUM_ENTRIES++];
+        memset(e, 0, sizeof(*e));
+        jbm_strcpy_(e->id, JBM_BUILTINS[i].id, sizeof(e->id));
+        jbm_strcpy_(e->name, JBM_BUILTINS[i].name, sizeof(e->name));
+        e->type = JBM_BUILTINS[i].type;
+        e->enabled = 1;
+        e->order = i;
+        e->is_default = (i == 0);
+    }
+}
+
+static int jbm_default_entry_index(void) {
+    if (JBM_CFG.default_entry >= 0 && JBM_CFG.default_entry < JBM_NUM_ENTRIES)
+        return JBM_CFG.default_entry;
+    for (int i = 0; i < JBM_NUM_ENTRIES; i++)
+        if (JBM_ENTRIES[i].is_default) return i;
+    return JBM_NUM_ENTRIES > 0 ? 0 : -1;
+}
+
+/* ------------------------------------------------------------------ */
+/* first-run config tree: create /cache/Jupiter and default files      */
+/* ------------------------------------------------------------------ */
+
+/* True when path opens as a directory (works for files too, but only a
+ * directory passes O_DIRECTORY). */
+static int jbm_dir_ok(const char *path) {
+    int fd = jbm_open(path, O_RDONLY | O_DIRECTORY, 0);
+    if (fd < 0) return 0;
+    jbm_close(fd);
+    return 1;
+}
+
+/* Creates path and every missing parent with mode 0755. Existing components
+ * are left alone (even if the mode differs). Returns 0 when path is a
+ * directory afterwards, -1 on any failure. */
+static int jbm_mkdir_p(const char *path) {
+    char tmp[192];
+    jbm_strcpy_(tmp, path, sizeof(tmp));
+    u32 len = strlen(tmp);
+    if (!len || len >= sizeof(tmp)) return -1;
+    for (u32 i = 1; i <= len; i++) {
+        if (tmp[i] != '/' && tmp[i] != 0) continue;
+        char save = tmp[i];
+        tmp[i] = 0;
+        if (!jbm_dir_ok(tmp)) {
+            i64 r = jbm_mkdir(tmp, 0755);
+            if (!jbm_dir_ok(tmp)) {
+                jbm_log("jbm: mkdir %s failed (%lld)", tmp, (long long)r);
+                tmp[i] = save;
+                return -1;
+            }
+        }
+        tmp[i] = save;
+    }
+    return jbm_dir_ok(path) ? 0 : -1;
+}
+
+/* Appends s to buf[off..cap) and returns the new offset. */
+static u32 jbm_app(char *buf, u32 cap, u32 off, const char *s) {
+    while (*s && off + 1 < cap) buf[off++] = *s++;
+    buf[off] = 0;
+    return off;
+}
+
+static u32 jbm_app_str(char *b, u32 cap, u32 o, const char *key, const char *v) {
+    char t[192];
+    jbm_sn(t, "%s = %s\n", key, v);
+    return jbm_app(b, cap, o, t);
+}
+
+static u32 jbm_app_int(char *b, u32 cap, u32 o, const char *key, int v) {
+    char t[64];
+    jbm_sn(t, "%s = %d\n", key, v);
+    return jbm_app(b, cap, o, t);
+}
+
+static u32 jbm_app_color(char *b, u32 cap, u32 o, const char *key, u32 c) {
+    char t[64];
+    jbm_sn(t, "%s = #%06x\n", key, c & 0xFFFFFFu);
+    return jbm_app(b, cap, o, t);
+}
+
+/* Writes data to path only when path does not exist, atomically through a
+ * sibling .tmp file + rename. Existing files are never truncated. Returns 0
+ * created, 1 already present (untouched), -1 on error. */
+static int jbm_write_file_new(const char *path, const void *data, u32 len) {
+    if (jbm_exists(path)) return 1;
+    char tmp[224];
+    jbm_sn(tmp, "%s.tmp", path);
+    int fd = jbm_open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        jbm_log("jbm: cannot create %s", tmp);
+        return -1;
+    }
+    const u8 *p = (const u8 *)data;
+    u32 off = 0;
+    while (off < len) {
+        i64 w = jbm_write(fd, p + off, len - off);
+        if (w <= 0) break;
+        off += (u32)w;
+    }
+    jbm_close(fd);
+    if (off < len) {
+        jbm_log("jbm: short write to %s (%u/%u)", tmp, off, len);
+        return -1;
+    }
+    if (jbm_rename(tmp, path) != 0) {
+        jbm_log("jbm: rename %s -> %s failed", tmp, path);
+        return -1;
+    }
+    return 0;
+}
+
+static int jbm_write_new_text(const char *path, const char *text) {
+    return jbm_write_file_new(path, text, (u32)strlen(text));
+}
+
+static void jbm_write_default_config(void) {
+    jbm_config_t d;
+    jbm_set_default_config(&d);
+    static char b[2048];
+    char path[192];
+    u32 o = 0;
+    o = jbm_app(b, sizeof(b), o,
+                "# JupiterBoot configuration -- generated on first boot.\n"
+                "# Edit the values below and reboot. Delete this file to get the\n"
+                "# defaults back. Full reference: README.md (Configuration).\n\n");
+    o = jbm_app(b, sizeof(b), o, "# Look and feel\n");
+    o = jbm_app_str(b, sizeof(b), o, "theme", d.theme_name);
+    o = jbm_app(b, sizeof(b), o, "# background = ");
+    o = jbm_app(b, sizeof(b), o, JBM_ROOT);
+    o = jbm_app(b, sizeof(b), o, "/background.bmp\n");
+    o = jbm_app(b, sizeof(b), o,
+                "# Colours/metrics live in themes/default.ini. Uncomment a line\n"
+                "# here to override the theme just for this device.\n");
+    o = jbm_app_int(b, sizeof(b), o, "# button_style", d.button_style);
+    o = jbm_app_color(b, sizeof(b), o, "# color_bg", d.color_bg);
+    o = jbm_app_color(b, sizeof(b), o, "# color_fg", d.color_fg);
+    o = jbm_app_color(b, sizeof(b), o, "# color_border", d.color_border);
+    o = jbm_app_color(b, sizeof(b), o, "# color_highlight", d.color_highlight);
+    o = jbm_app_color(b, sizeof(b), o, "# color_text", d.color_text);
+    o = jbm_app_color(b, sizeof(b), o, "# color_text_sel", d.color_text_sel);
+    o = jbm_app_color(b, sizeof(b), o, "# color_accent", d.color_accent);
+    o = jbm_app_int(b, sizeof(b), o, "# button_width", d.button_width);
+    o = jbm_app_int(b, sizeof(b), o, "# button_height", d.button_height);
+    o = jbm_app_int(b, sizeof(b), o, "# button_spacing", d.button_spacing);
+    o = jbm_app_int(b, sizeof(b), o, "# button_radius", d.button_radius);
+    o = jbm_app_int(b, sizeof(b), o, "# text_size", d.text_size);
+    o = jbm_app(b, sizeof(b), o, "\n# Behaviour\n");
+    o = jbm_app_int(b, sizeof(b), o, "menu_timeout_sec", d.menu_timeout_sec);
+    o = jbm_app_int(b, sizeof(b), o, "show_countdown", d.show_countdown);
+    o = jbm_app_int(b, sizeof(b), o, "show_brand", d.show_brand);
+    o = jbm_app_int(b, sizeof(b), o, "default_entry", d.default_entry);
+    o = jbm_app(b, sizeof(b), o, "\n# Display (orientation: 0/90/180/270 or auto)\n");
+    o = jbm_app_int(b, sizeof(b), o, "orientation", d.orientation);
+    o = jbm_app_int(b, sizeof(b), o, "prefer_drm", d.prefer_drm);
+    o = jbm_app_int(b, sizeof(b), o, "fallback_to_fb", d.fallback_to_fb);
+    o = jbm_app(b, sizeof(b), o, "# input_device = event2\n");
+    o = jbm_app(b, sizeof(b), o, "# touch_cal_x0 = 0\n# touch_cal_y0 = 0\n"
+                                "# touch_cal_x1 = 0\n# touch_cal_y1 = 0\n");
+    o = jbm_app(b, sizeof(b), o, "\n# Logging\n");
+    o = jbm_app_int(b, sizeof(b), o, "log_level", d.log_level);
+    o = jbm_app_int(b, sizeof(b), o, "log_file", d.log_file);
+    (void)o;
+    jbm_sn(path, "%s/config.ini", JBM_ROOT);
+    jbm_write_new_text(path, b);
+}
+
+static void jbm_write_default_entries_file(void) {
+    static char b[2048];
+    char path[192], t[160];
+    u32 o = 0;
+    o = jbm_app(b, sizeof(b), o,
+                "# JupiterBoot boot menu entries -- generated on first boot.\n"
+                "# Each [section] is one row. Delete this file to get the\n"
+                "# defaults back. type: system|recovery|fastboot|download|\n"
+                "# reboot|poweroff|script|binary\n\n");
+    for (int i = 0; i < JBM_NUM_BUILTINS; i++) {
+        jbm_sn(t, "[%s]\nname = %s\ntype = %s\nenabled = 1\norder = %d\ndefault = %d\n",
+               JBM_BUILTINS[i].id, JBM_BUILTINS[i].name, jbm_entry_type_name(JBM_BUILTINS[i].type),
+               i, i == 0 ? 1 : 0);
+        o = jbm_app(b, sizeof(b), o, t);
+        if (i + 1 < JBM_NUM_BUILTINS) o = jbm_app(b, sizeof(b), o, "\n");
+    }
+    (void)o;
+    jbm_sn(path, "%s/entries.ini", JBM_ROOT);
+    jbm_write_new_text(path, b);
+}
+
+static void jbm_write_default_theme_file(void) {
+    jbm_theme_t d;
+    jbm_set_default_theme(&d);
+    static char b[1024];
+    char path[192];
+    u32 o = 0;
+    o = jbm_app(b, sizeof(b), o,
+                "# JupiterBoot theme 'default' -- generated on first boot.\n"
+                "# A config.ini colour overrides the matching value here.\n\n");
+    o = jbm_app_int(b, sizeof(b), o, "button_style", d.button_style);
+    o = jbm_app_color(b, sizeof(b), o, "color_bg", d.color_bg);
+    o = jbm_app_color(b, sizeof(b), o, "color_fg", d.color_fg);
+    o = jbm_app_color(b, sizeof(b), o, "color_border", d.color_border);
+    o = jbm_app_color(b, sizeof(b), o, "color_highlight", d.color_highlight);
+    o = jbm_app_color(b, sizeof(b), o, "color_text", d.color_text);
+    o = jbm_app_color(b, sizeof(b), o, "color_text_sel", d.color_text_sel);
+    o = jbm_app_color(b, sizeof(b), o, "color_accent", d.color_accent);
+    o = jbm_app_int(b, sizeof(b), o, "button_width", d.button_width);
+    o = jbm_app_int(b, sizeof(b), o, "button_height", d.button_height);
+    o = jbm_app_int(b, sizeof(b), o, "button_spacing", d.button_spacing);
+    o = jbm_app_int(b, sizeof(b), o, "button_radius", d.button_radius);
+    o = jbm_app_int(b, sizeof(b), o, "button_border_width", d.button_border_width);
+    o = jbm_app_int(b, sizeof(b), o, "text_size", d.text_size);
+    (void)o;
+    jbm_sn(path, "%s/themes/default.ini", JBM_ROOT);
+    jbm_write_new_text(path, b);
+}
+
+static void jbm_le16(u8 *p, u16 v) {
+    p[0] = (u8)v;
+    p[1] = (u8)(v >> 8);
+}
+static void jbm_le32(u8 *p, u32 v) {
+    p[0] = (u8)v;
+    p[1] = (u8)(v >> 8);
+    p[2] = (u8)(v >> 16);
+    p[3] = (u8)(v >> 24);
+}
+
+/* A small, valid 24-bpp BMP that approximates the built-in menu backdrop: a
+ * dark field with the same warm glow in the same corner. Generated once so the
+ * user has a real file to replace; deleting it brings the procedural scene
+ * (which also draws the planet) back. */
+static void jbm_write_default_background_file(void) {
+    const int W = 180, H = 400;
+    const u32 row = (u32)W * 3u; /* 540, already 4-byte aligned */
+    const u32 datasize = row * (u32)H;
+    const u32 filesize = 54u + datasize;
+    char path[192], tmp[224];
+    jbm_sn(path, "%s/background.bmp", JBM_ROOT);
+    if (jbm_exists(path)) return;
+    jbm_sn(tmp, "%s.tmp", path);
+    int fd = jbm_open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        jbm_log("jbm: cannot create %s", tmp);
+        return;
+    }
+    u8 hdr[54];
+    memset(hdr, 0, sizeof(hdr));
+    hdr[0] = 'B';
+    hdr[1] = 'M';
+    jbm_le32(hdr + 2, filesize);
+    jbm_le32(hdr + 10, 54);
+    jbm_le32(hdr + 14, 40);
+    jbm_le32(hdr + 18, (u32)W);
+    jbm_le32(hdr + 22, (u32)H);
+    jbm_le16(hdr + 26, 1);
+    jbm_le16(hdr + 28, 24);
+    jbm_le32(hdr + 34, datasize);
+    if (jbm_write(fd, hdr, 54) != 54) {
+        jbm_close(fd);
+        return;
+    }
+    int gx = W * 72 / 100, gy = H * 45 / 100, rad = 130;
+    i64 rad2 = (i64)rad * rad;
+    u8 rowbuf[180 * 3 + 4];
+    for (int y = 0; y < H; y++) { /* file rows are bottom-up */
+        int yy = H - 1 - y;
+        for (int x = 0; x < W; x++) {
+            int r = 2, g = 2, bl = 2;
+            i64 dx = x - gx, dy = yy - gy;
+            i64 d2 = dx * dx + dy * dy;
+            if (d2 < rad2) {
+                int f = (int)((rad2 - d2) * 200 / rad2); /* 0..200 */
+                r += (0x64 - 2) * f / 200;
+                g += (0x3E - 2) * f / 200;
+                bl += (0x23 - 2) * f / 200;
+            }
+            rowbuf[x * 3 + 0] = (u8)bl;
+            rowbuf[x * 3 + 1] = (u8)g;
+            rowbuf[x * 3 + 2] = (u8)r;
+        }
+        if (jbm_write(fd, rowbuf, row) != (i64)row) {
+            jbm_log("jbm: short write to %s", tmp);
+            jbm_close(fd);
+            return;
+        }
+    }
+    jbm_close(fd);
+    if (jbm_rename(tmp, path) != 0) jbm_log("jbm: rename %s -> %s failed", tmp, path);
+}
+
+static void jbm_ensure_tree(void) {
+    char p[192];
+    if (jbm_mkdir_p(JBM_ROOT) != 0) return;
+    jbm_sn(p, "%s/themes", JBM_ROOT);
+    jbm_mkdir_p(p);
+    jbm_sn(p, "%s/scripts", JBM_ROOT);
+    jbm_mkdir_p(p);
+    jbm_sn(p, "%s/bin", JBM_ROOT);
+    jbm_mkdir_p(p);
+}
+
+static void jbm_generate_defaults(void) {
+    if (!jbm_dir_ok(JBM_ROOT)) {
+        jbm_log("jbm: config root %s unavailable, skipping defaults", JBM_ROOT);
+        return;
+    }
+    jbm_write_default_config();
+    jbm_write_default_entries_file();
+    jbm_write_default_theme_file();
+    jbm_write_default_background_file();
+    jbm_log("jbm: ensured default files under %s", JBM_ROOT);
+}
+
+/* ------------------------------------------------------------------ */
+/* config root + /cache bring-up                                       */
+/* ------------------------------------------------------------------ */
+
+#ifndef JBM_HOST
+/* True when the mount point already appears in /proc/mounts. */
+static int jbm_is_mounted(const char *mp) {
+    char buf[4096];
+    if (jbm_read_text("/proc/mounts", buf, sizeof(buf)) != 0) return 0;
+    char *line = buf;
+    while (*line) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        char *sp = strchr(line, ' ');
+        if (sp) {
+            char *mp0 = sp + 1;
+            char *sp2 = strchr(mp0, ' ');
+            if (sp2) *sp2 = 0;
+            if (strcmp(mp0, mp) == 0) return 1;
+        }
+        if (nl) line = nl + 1;
+        else break;
+    }
+    return 0;
+}
+#endif /* !JBM_HOST */
+
+/* Picks /cache/Jupiter when it holds anything, else the ramdisk /Jupiter. */
+static void jbm_cfg_pick_root(void) {
+    const char *cands[2] = {JBM_CONFIG_DIR, JBM_RAMDISK_DIR};
+    const char *files[4] = {"config.ini", "entries.ini", "themes", "background.bmp"};
+    for (int c = 0; c < 2; c++) {
+        for (int f = 0; f < 4; f++) {
+            char p[192];
+            jbm_sn(p, "%s/%s", cands[c], files[f]);
+            if (jbm_exists(p)) {
+                jbm_strcpy_(JBM_ROOT, cands[c], sizeof(JBM_ROOT));
+                return;
+            }
+        }
+    }
+    jbm_log("jbm: no config root found, defaulting to %s", JBM_ROOT);
+}
+
+/* Counts directory entries other than "." and "..". */
+#ifndef JBM_HOST
+static int jbm_dir_count(const char *path) {
+    int fd = jbm_open(path, O_RDONLY | O_DIRECTORY, 0);
+    if (fd < 0) return -1;
+    static u8 buf[4096];
+    int n = 0;
+    for (;;) {
+        long r = jbm_getdents(fd, buf, (u32)sizeof(buf));
+        if (r <= 0) break;
+        long off = 0;
+        while (off < r) {
+            struct jbm_dirent64 *d = (struct jbm_dirent64 *)(buf + off);
+            off += d->d_reclen;
+            if (d->d_name[0] == '.' &&
+                (d->d_name[1] == 0 || (d->d_name[1] == '.' && d->d_name[2] == 0)))
+                continue;
+            n++;
+        }
+    }
+    jbm_close(fd);
+    return n;
+}
+#endif /* !JBM_HOST */
+
+#ifndef JBM_HOST
+/* Mounts node on /cache as ext4 then f2fs. known_cache marks a device we have
+ * already identified as the cache partition (by-name or PARTNAME=cache); for
+ * those any successful mount is accepted. The blind fallback below stays
+ * conservative so userdata is never mounted over /cache by mistake. */
+static int jbm_mount_cache_dev(const char *node, int known_cache) {
+    const char *types[2] = {"ext4", "f2fs"};
+    for (int t = 0; t < 2; t++) {
+        if (jbm_mount(node, "/cache", types[t], 0, NULL) != 0) continue;
+        int has_jup = jbm_exists("/cache/Jupiter");
+        int n = jbm_dir_count("/cache");
+        if (known_cache || has_jup || (n >= 0 && n <= 3)) {
+            JBM_CACHE_MOUNTED = 1;
+            JBM_CACHE_READY = 1;
+            jbm_log("jbm: mounted %s (%s) on /cache (entries=%d jupiter=%d)", node, types[t], n,
+                    has_jup);
+            return 1;
+        }
+        jbm_log("jbm: %s (%s) does not look like cache (entries=%d), unmounting", node, types[t], n);
+        jbm_umount("/cache");
+    }
+    return 0;
+}
+
+/* Creates /dev/block/<name> from /sys/class/block/<name>/dev. */
+static int jbm_block_node(const char *name, char *node, u32 cap) {
+    char devp[128], raw[64];
+    jbm_sn(devp, "/sys/class/block/%s/dev", name);
+    if (jbm_read_text(devp, raw, sizeof(raw)) <= 0) return -1;
+    const char *colon = strchr(raw, ':');
+    if (!colon) return -1;
+    int maj = jbm_atoi_(raw), min = jbm_atoi_(colon + 1);
+    jbm_sn(node, "/dev/block/%s", name);
+    (void)cap;
+    jbm_mknod(node, 0600 | S_IFBLK, (maj << 8) | min);
+    return 0;
+}
+
+/* True when a sysfs uevent buffer has a line "PARTNAME=cache" (the last line
+ * has no trailing newline after jbm_read_text trims it). */
+static int jbm_uevent_is_cache(const char *u) {
+    const char key[] = "PARTNAME=cache";
+    for (const char *p = u; *p; p++) {
+        int i = 0;
+        while (key[i] && p[i] == key[i]) i++;
+        if (!key[i] && (p[i] == '\n' || p[i] == 0)) return 1;
+    }
+    return 0;
+}
+
+/* True when node carries an ext4 volume label exactly "cache". */
+static int jbm_dev_label_is_cache(const char *node) {
+    int fd = jbm_open(node, O_RDONLY, 0);
+    if (fd < 0) return 0;
+    u8 sb[1024];
+    int ok = 0;
+    if (jbm_lseek(fd, 1024, SEEK_SET) == 1024 && jbm_read(fd, sb, sizeof(sb)) == (long)sizeof(sb)) {
+        u16 magic = (u16)(sb[0x38] | (sb[0x39] << 8));
+        if (magic == 0xEF53) { /* ext2/3/4 superblock magic */
+            char lbl[17];
+            memcpy(lbl, sb + 0x78, 16); /* s_volume_name */
+            lbl[16] = 0;
+            if (strcmp(lbl, "cache") == 0) ok = 1;
+        }
+    }
+    jbm_close(fd);
+    return ok;
+}
+#endif /* !JBM_HOST */
+
+/* Best-effort /cache bring-up: the menu runs before the real init mounts it.
+ * The fstab names the partition by-name/cache, so prefer that symlink and the
+ * sysfs PARTNAME=cache label; only fall back to a blind probe when neither is
+ * available. */
+static void jbm_cache_init(void) __attribute__((unused));
+static void jbm_cache_init(void) {
+#ifdef JBM_HOST
+    return;
+#else
+    jbm_mkdir("/cache", 0755);
+    if (jbm_is_mounted("/cache")) {
+        jbm_log("jbm: /cache already mounted");
+        JBM_CACHE_READY = 1;
+        return;
+    }
+    if (jbm_exists(JBM_RAMDISK_DIR)) {
+        jbm_log("jbm: using ramdisk config root %s", JBM_RAMDISK_DIR);
+        jbm_strcpy_(JBM_ROOT, JBM_RAMDISK_DIR, sizeof(JBM_ROOT));
+        JBM_CACHE_READY = 1;
+        return;
+    }
+
+    jbm_mkdir("/dev", 0755);
+    jbm_mkdir("/dev/block", 0755);
+
+    /* 1. by-name symlinks (usually created by ueventd, sometimes already
+     * present in the initramfs). */
+    const char *byname[3] = {"/dev/block/platform/bootdevice/by-name/cache",
+                             "/dev/block/by-name/cache", "/dev/block/bootdevice/by-name/cache"};
+    for (int i = 0; i < 3; i++) {
+        if (jbm_exists(byname[i]) && jbm_mount_cache_dev(byname[i], 1)) return;
+    }
+
+    /* Phones expose well over 100 entries here (dm/loop/zram + every GPT
+     * partition), so the buffer must not truncate before the cache partition. */
+    static char names[256][32];
+    int count = 0;
+    int dfd = jbm_open("/sys/class/block", O_RDONLY, 0);
+    if (dfd >= 0) {
+        static u8 dbuf[8192];
+        for (;;) {
+            long r = jbm_getdents(dfd, dbuf, (u32)sizeof(dbuf));
+            if (r <= 0) break;
+            long off = 0;
+            while (off < r && count < 256) {
+                struct jbm_dirent64 *d = (struct jbm_dirent64 *)(dbuf + off);
+                off += d->d_reclen;
+                if (d->d_name[0] == '.') continue;
+                jbm_strcpy_(names[count++], d->d_name, 32);
+            }
+        }
+        jbm_close(dfd);
+    }
+
+    /* 2. the partition whose GPT/uevent label is exactly "cache". */
+    for (int i = 0; i < count; i++) {
+        char uevp[128], uev[256];
+        jbm_sn(uevp, "/sys/class/block/%s/uevent", names[i]);
+        if (jbm_read_text(uevp, uev, sizeof(uev)) <= 0) continue;
+        if (!jbm_uevent_is_cache(uev)) continue;
+        char node[96];
+        if (jbm_block_node(names[i], node, sizeof(node)) != 0) continue;
+        jbm_log("jbm: found cache partition %s (%s)", names[i], node);
+        if (jbm_mount_cache_dev(node, 1)) return;
+    }
+
+    /* 3. conservative blind probe. */
+    for (int i = 0; i < count; i++) {
+        const char *nm = names[i];
+        if (jbm_str_has(nm, "loop") || jbm_str_has(nm, "ram") || jbm_str_has(nm, "zram") ||
+            jbm_str_has(nm, "dm-") || jbm_str_has(nm, "sr") || jbm_str_has(nm, "rpmb") ||
+            jbm_str_has(nm, "boot"))
+            continue;
+        char node[96];
+        if (jbm_block_node(nm, node, sizeof(node)) != 0) continue;
+        int known = jbm_dev_label_is_cache(node);
+        if (jbm_mount_cache_dev(node, known)) return;
+    }
+    jbm_log("jbm: could not mount /cache, using defaults");
+#endif
+}
+
+static void jbm_log_file_open(void) {
+    if (!JBM_CFG.log_file || JBM_CFG.log_level < 6) return;
+    char path[192];
+    jbm_sn(path, "%s/boot.log", JBM_ROOT);
+    jbm_log_fd = jbm_open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (jbm_log_fd < 0) jbm_log_fd = -1;
+}
+
+/* One-shot startup: bring /cache up, pick the root, load config/theme/entries
+ * and reduce them to the JBM_FX the renderer uses. */
+static void jbm_config_init(void) {
+#ifdef JBM_HOST
+    /* Host previews/tests point at a directory with JUPITER_CONFIG_ROOT; when
+     * it is unset we only probe (read-only) and never create /cache on the PC. */
+    const char *eroot = getenv("JUPITER_CONFIG_ROOT");
+    if (eroot && eroot[0]) {
+        jbm_strcpy_(JBM_ROOT, eroot, sizeof(JBM_ROOT));
+        JBM_CFG_WRITABLE = 1;
+        jbm_log("jbm: JUPITER_CONFIG_ROOT=%s", JBM_ROOT);
+    } else {
+        jbm_cfg_pick_root();
+        JBM_CFG_WRITABLE = 0;
+    }
+#else
+    jbm_cache_init();
+    jbm_cfg_pick_root();
+    JBM_CFG_WRITABLE = JBM_CACHE_READY || (strcmp(JBM_ROOT, JBM_RAMDISK_DIR) == 0);
+#endif
+    if (JBM_CFG_WRITABLE) {
+        jbm_ensure_tree();
+        jbm_generate_defaults();
+    } else {
+        jbm_log("jbm: config root %s not writable, using built-in defaults", JBM_ROOT);
+    }
+    jbm_load_config(&JBM_CFG);
+    if (!JBM_CFG.background_path[0])
+        jbm_sn(JBM_CFG.background_path, "%s/background.bmp", JBM_ROOT);
+    jbm_load_entries();
+    jbm_ensure_default_entries();
+    jbm_build_effects();
+    jbm_log_file_open();
+    jbm_log("jbm: config root=%s entries=%d default=%d timeout=%ds", JBM_ROOT, JBM_NUM_ENTRIES,
+            jbm_default_entry_index(), JBM_CFG.menu_timeout_sec);
+}
+
+/* ------------------------------------------------------------------ */
+/* background bitmap (BMP)                                             */
+/* ------------------------------------------------------------------ */
+
+struct jbm_bg {
+    u32 *px; /* ARGB, top-down, w*h */
+    int w, h, ok;
+};
+
+static struct jbm_bg JBM_BG;
+
+static int jbm_mask_shift(u32 m, int *bits) {
+    if (!m) {
+        *bits = 0;
+        return 0;
+    }
+    int s = 0;
+    while (!(m & 1u)) {
+        m >>= 1;
+        s++;
+    }
+    int b = 0;
+    while (m & 1u) {
+        m >>= 1;
+        b++;
+    }
+    *bits = b;
+    return s;
+}
+
+static u32 jbm_mask_val(u32 raw, u32 mask) {
+    int bits;
+    int sh = jbm_mask_shift(mask, &bits);
+    if (!bits) return 0;
+    u32 v = (raw & mask) >> sh;
+    if (bits >= 8) return (v & 0xFFu);
+    return (v * 255u) / (((u32)1u << bits) - 1u);
+}
+
+/* Loads an uncompressed 8/24/32-bpp BMP into JBM_BG. Returns 0 on success. */
+static int jbm_bg_load(const char *path) {
+    JBM_BG.ok = 0;
+    JBM_BG.px = 0;
+    if (!path || !path[0] || strcmp(path, "-") == 0) return -1;
+
+    int fd = jbm_open(path, O_RDONLY, 0);
+    if (fd < 0) {
+        jbm_log("jbm: background %s not found, keeping procedural art", path);
+        return -1;
+    }
+    u8 hdr[64];
+    long hn = jbm_read(fd, hdr, sizeof(hdr));
+    if (hn < 54 || hdr[0] != 'B' || hdr[1] != 'M') {
+        jbm_log("jbm: %s is not a BMP", path);
+        jbm_close(fd);
+        return -1;
+    }
+    u32 data_off = *(u32 *)(hdr + 10);
+    u32 dib = *(u32 *)(hdr + 14);
+    i32 w = *(i32 *)(hdr + 18);
+    i32 h = *(i32 *)(hdr + 22);
+    u16 planes = *(u16 *)(hdr + 26);
+    u16 bpp = *(u16 *)(hdr + 28);
+    u32 comp = *(u32 *)(hdr + 30);
+    int topdown = 0;
+    if (h < 0) {
+        h = -h;
+        topdown = 1;
+    }
+    if (dib < 40 || w <= 0 || h <= 0 || w > 8192 || h > 8192 || planes != 1 ||
+        (bpp != 8 && bpp != 24 && bpp != 32) || (comp != 0 && comp != 3)) {
+        jbm_log("jbm: unsupported BMP %s (dib=%u %dx%d bpp=%u comp=%u)", path, dib, w, h, bpp, comp);
+        jbm_close(fd);
+        return -1;
+    }
+
+    u32 rmask = 0, gmask = 0, bmask = 0, amask = 0;
+    if (comp == 3) {
+        u8 mk[16];
+        if (jbm_lseek(fd, 14 + (i64)dib, SEEK_SET) != 14 + (i64)dib ||
+            jbm_read(fd, mk, sizeof(mk)) < 12) {
+            jbm_log("jbm: %s bitfield masks unreadable", path);
+            jbm_close(fd);
+            return -1;
+        }
+        rmask = *(u32 *)(mk);
+        gmask = *(u32 *)(mk + 4);
+        bmask = *(u32 *)(mk + 8);
+        if (dib >= 56) amask = *(u32 *)(mk + 12);
+    } else if (bpp == 32) {
+        rmask = 0x00FF0000u;
+        gmask = 0x0000FF00u;
+        bmask = 0x000000FFu;
+        amask = 0xFF000000u;
+    } else if (bpp == 24) {
+        rmask = 0x00FF0000u;
+        gmask = 0x0000FF00u;
+        bmask = 0x000000FFu;
+    } else { /* 8 bpp palette entries are BGRA */
+        rmask = 0x00FF0000u;
+        gmask = 0x0000FF00u;
+        bmask = 0x000000FFu;
+    }
+
+    u32 pal[256];
+    if (bpp == 8) {
+        if (jbm_lseek(fd, 14 + (i64)dib, SEEK_SET) != 14 + (i64)dib ||
+            jbm_read(fd, pal, sizeof(pal)) < (long)sizeof(pal)) {
+            jbm_log("jbm: %s palette unreadable", path);
+            jbm_close(fd);
+            return -1;
+        }
+        for (int i = 0; i < 256; i++) {
+            u32 bgra = pal[i];
+            u32 a = (bgra >> 24) & 0xFF;
+            pal[i] = ((a ? a : 0xFFu) << 24) | ((bgra & 0xFF) << 16) | (bgra & 0xFF00) |
+                     ((bgra >> 16) & 0xFF);
+        }
+    }
+
+    u32 row = (((u32)w * bpp) + 31u) / 32u * 4u;
+    u32 total = row * (u32)h;
+    if (total > 64u * 1024u * 1024u) {
+        jbm_log("jbm: %s too large (%u bytes)", path, total);
+        jbm_close(fd);
+        return -1;
+    }
+    if (jbm_lseek(fd, (i64)data_off, SEEK_SET) != (i64)data_off) {
+        jbm_close(fd);
+        return -1;
+    }
+    u8 *raw = (u8 *)jbm_mmap(total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (!raw) {
+        jbm_close(fd);
+        return -1;
+    }
+    u32 got = 0;
+    while (got < total) {
+        long r = jbm_read(fd, raw + got, total - got);
+        if (r <= 0) break;
+        got += (u32)r;
+    }
+    jbm_close(fd);
+    if (got < total) {
+        jbm_log("jbm: %s short read (%u/%u)", path, got, total);
+        jbm_release(raw, total);
+        return -1;
+    }
+
+    u32 npx = (u32)w * (u32)h;
+    u32 *px = (u32 *)jbm_mmap(npx * 4u, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (!px) {
+        jbm_release(raw, total);
+        return -1;
+    }
+    for (int y = 0; y < h; y++) {
+        u8 *srow = raw + (u32)y * row;
+        u32 *drow = px + (u32)(topdown ? y : (h - 1 - y)) * (u32)w;
+        for (int x = 0; x < w; x++) {
+            u32 argb;
+            if (bpp == 8) {
+                argb = pal[srow[x]];
+            } else if (bpp == 24) {
+                u32 b = srow[x * 3], g = srow[x * 3 + 1], r = srow[x * 3 + 2];
+                argb = 0xFF000000u | (r << 16) | (g << 8) | b;
+            } else {
+                u32 rawpx = *(u32 *)(srow + x * 4);
+                u32 a = amask ? jbm_mask_val(rawpx, amask) : 0xFF;
+                argb = ((a ? a : 0xFFu) << 24) | (jbm_mask_val(rawpx, rmask) << 16) |
+                       (jbm_mask_val(rawpx, gmask) << 8) | jbm_mask_val(rawpx, bmask);
+            }
+            drow[x] = argb;
+        }
+    }
+    jbm_release(raw, total);
+
+    JBM_BG.px = px;
+    JBM_BG.w = w;
+    JBM_BG.h = h;
+    JBM_BG.ok = 1;
+    jbm_log("jbm: loaded background %s (%dx%d bpp=%u)", path, w, h, bpp);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* canvas / framebuffer                                                */
 /* ------------------------------------------------------------------ */
+
+/* Minimal DRM/KMS ABI (struct layouts and ioctl encodings match
+ * include/uapi/drm/drm_mode.h) so the menu can also drive a KMS node when
+ * there is no usable framebuffer, or when prefer_drm=1 is set. */
+struct jbm_drm_mode_card_res {
+    u64 fb_id_ptr, crtc_id_ptr, connector_id_ptr, encoder_id_ptr;
+    u32 count_fbs, count_crtcs, count_connectors, count_encoders;
+    u32 min_width, max_width, min_height, max_height;
+};
+
+struct jbm_drm_mode_modeinfo {
+    u32 clock;
+    u16 hdisplay, hsync_start, hsync_end, htotal, hskew;
+    u16 vdisplay, vsync_start, vsync_end, vtotal, vscan;
+    u32 vrefresh, flags, type;
+    char name[32];
+};
+
+struct jbm_drm_mode_get_connector {
+    u64 encoders_ptr, modes_ptr, props_ptr, prop_values_ptr;
+    u32 count_modes, count_props, count_encoders, encoder_id;
+    u32 connector_id, connector_type, connector_type_id, connection;
+    u32 mm_width, mm_height, subpixel, pad;
+};
+
+struct jbm_drm_mode_get_encoder {
+    u32 encoder_id, encoder_type, crtc_id, possible_crtcs, possible_clones;
+};
+
+struct jbm_drm_mode_crtc {
+    u64 set_connectors_ptr;
+    u32 count_connectors;
+    u32 crtc_id, fb_id;
+    u32 x, y;
+    u32 gamma_size, mode_valid;
+    struct jbm_drm_mode_modeinfo mode;
+};
+
+struct jbm_drm_mode_create_dumb {
+    u32 height, width, bpp, flags, handle, pitch;
+    u64 size;
+};
+
+struct jbm_drm_mode_map_dumb {
+    u32 handle, pad;
+    u64 offset;
+};
+
+struct jbm_drm_mode_fb_cmd {
+    u32 fb_id, width, height, pitch, bpp, depth, handle;
+};
+
+#define JBM_IOC(dir, type, nr, size) (((dir) << 30) | ((size) << 16) | ((type) << 8) | (nr))
+#define JBM_DRM_IOWR(nr, sz) JBM_IOC(3, 'd', nr, sz)
+#define DRM_IOCTL_MODE_GETRESOURCES JBM_DRM_IOWR(0xA0, sizeof(struct jbm_drm_mode_card_res))
+#define DRM_IOCTL_MODE_GETCRTC JBM_DRM_IOWR(0xA1, sizeof(struct jbm_drm_mode_crtc))
+#define DRM_IOCTL_MODE_GETENCODER JBM_DRM_IOWR(0xA6, sizeof(struct jbm_drm_mode_get_encoder))
+#define DRM_IOCTL_MODE_GETCONNECTOR JBM_DRM_IOWR(0xA7, sizeof(struct jbm_drm_mode_get_connector))
+#define DRM_IOCTL_MODE_SETCRTC JBM_DRM_IOWR(0xA8, sizeof(struct jbm_drm_mode_crtc))
+#define DRM_IOCTL_MODE_ADDFB JBM_DRM_IOWR(0xAE, sizeof(struct jbm_drm_mode_fb_cmd))
+#define DRM_IOCTL_MODE_CREATE_DUMB JBM_DRM_IOWR(0xB2, sizeof(struct jbm_drm_mode_create_dumb))
+#define DRM_IOCTL_MODE_MAP_DUMB JBM_DRM_IOWR(0xB3, sizeof(struct jbm_drm_mode_map_dumb))
 
 struct gfx {
     int fd;
@@ -619,6 +2065,10 @@ struct gfx {
     u32 w, h, bpp;
     u32 ro, rl, go, gl, bo, bl, to, tl;
     int ok;
+    int rot;    /* fb_var.rotate (0..3 quarter turns), diagnostics + auto orientation */
+    int is_drm; /* 1 when G.mem is a dumb KMS buffer instead of fb0 */
+    u32 drm_crtc, drm_fb;
+    struct jbm_drm_mode_modeinfo drm_mode;
 };
 
 static struct gfx G;
@@ -761,9 +2211,185 @@ static int gfx_open(void) {
     G.bl = var.blue_length;
     G.to = var.transp_offset;
     G.tl = var.transp_length;
+    G.rot = (int)var.rotate;
+    G.is_drm = 0;
     G.ok = 1;
-    jbm_log("jbm: fb %ux%u bpp=%u stride=%u len=%u rgb=%u:%u/%u:%u/%u:%u a=%u:%u", G.w, G.h, G.bpp, stride, len,
-            G.rl, G.ro, G.gl, G.go, G.bl, G.bo, G.tl, G.to);
+    jbm_log("jbm: fb %ux%u bpp=%u stride=%u len=%u rgb=%u:%u/%u:%u/%u:%u a=%u:%u rot=%u", G.w, G.h, G.bpp,
+            stride, len, G.rl, G.ro, G.gl, G.go, G.bl, G.bo, G.tl, G.to, var.rotate);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* DRM/KMS backend (fallback or preferred via prefer_drm)              */
+/* ------------------------------------------------------------------ */
+
+/* Creates /dev/dri/card0 from the sysfs dev number if it is missing. */
+static int drm_node(void) {
+    int fd = jbm_open("/dev/dri/card0", O_RDWR, 0);
+    if (fd >= 0) return fd;
+    char raw[64];
+    if (jbm_read_text("/sys/class/drm/card0/dev", raw, sizeof(raw)) <= 0) return -1;
+    const char *colon = strchr(raw, ':');
+    if (!colon) return -1;
+    int maj = jbm_atoi_(raw), min = jbm_atoi_(colon + 1);
+    jbm_mkdir("/dev", 0755);
+    jbm_mkdir("/dev/dri", 0755);
+    jbm_mknod("/dev/dri/card0", 0600 | S_IFCHR, (maj << 8) | min);
+    return jbm_open("/dev/dri/card0", O_RDWR, 0);
+}
+
+static int drm_set_crtc(int fd, u32 crtc, u32 fb, u32 conn,
+                        const struct jbm_drm_mode_modeinfo *mode) {
+    struct jbm_drm_mode_crtc c;
+    memset(&c, 0, sizeof(c));
+    c.set_connectors_ptr = (u64)(unsigned long)&conn;
+    c.count_connectors = 1;
+    c.crtc_id = crtc;
+    c.fb_id = fb;
+    c.x = 0;
+    c.y = 0;
+    c.mode_valid = 1;
+    if (mode) c.mode = *mode;
+    return jbm_ioctl(fd, DRM_IOCTL_MODE_SETCRTC, &c);
+}
+
+/* Opens DRM/KMS, programs the first connected connector and maps its dumb
+ * buffer as the scanout. Returns 0 on success, -1 to let the fb path try. */
+static int drm_open_init(void) {
+    int fd = drm_node();
+    if (fd < 0) {
+        jbm_log("jbm: no DRM card node");
+        return -1;
+    }
+
+    static u32 crtcs[16], conns[32], encs[16], fbs[16];
+    struct jbm_drm_mode_card_res res;
+    memset(&res, 0, sizeof(res));
+    res.crtc_id_ptr = (u64)(unsigned long)crtcs;
+    res.connector_id_ptr = (u64)(unsigned long)conns;
+    res.encoder_id_ptr = (u64)(unsigned long)encs;
+    res.fb_id_ptr = (u64)(unsigned long)fbs;
+    res.count_crtcs = 16;
+    res.count_connectors = 32;
+    res.count_encoders = 16;
+    res.count_fbs = 16;
+    if (jbm_ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &res) != 0 || res.count_connectors == 0) {
+        jbm_log("jbm: DRM GETRESOURCES failed");
+        jbm_close(fd);
+        return -1;
+    }
+    jbm_log("jbm: DRM card0 crtcs=%u connectors=%u", res.count_crtcs, res.count_connectors);
+
+    static struct jbm_drm_mode_modeinfo modes[64];
+    u32 crtc = res.count_crtcs ? crtcs[0] : 0;
+    u32 conn_id = 0;
+    struct jbm_drm_mode_modeinfo mode;
+    memset(&mode, 0, sizeof(mode));
+    int found = 0;
+
+    for (u32 i = 0; i < res.count_connectors && i < 32 && !found; i++) {
+        struct jbm_drm_mode_get_connector c;
+        memset(&c, 0, sizeof(c));
+        c.connector_id = conns[i];
+        c.modes_ptr = (u64)(unsigned long)modes;
+        c.count_modes = 64;
+        if (jbm_ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &c) != 0) continue;
+        if (c.connection != 1 || c.count_modes == 0) continue; /* 1 = connected */
+
+        conn_id = c.connector_id;
+        mode = modes[0];
+        found = 1;
+        if (c.encoder_id) {
+            struct jbm_drm_mode_get_encoder e;
+            memset(&e, 0, sizeof(e));
+            e.encoder_id = c.encoder_id;
+            if (jbm_ioctl(fd, DRM_IOCTL_MODE_GETENCODER, &e) == 0 && e.crtc_id)
+                crtc = e.crtc_id;
+        }
+        jbm_log("jbm: DRM connector %u mode %ux%u@%u crtc=%u", conn_id, mode.hdisplay, mode.vdisplay,
+                mode.vrefresh, crtc);
+    }
+    if (!found) {
+        jbm_log("jbm: DRM has no connected connector");
+        jbm_close(fd);
+        return -1;
+    }
+
+    struct jbm_drm_mode_create_dumb dumb;
+    memset(&dumb, 0, sizeof(dumb));
+    dumb.width = mode.hdisplay;
+    dumb.height = mode.vdisplay;
+    dumb.bpp = 32;
+    if (jbm_ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &dumb) != 0 || !dumb.handle) {
+        jbm_log("jbm: DRM CREATE_DUMB failed");
+        jbm_close(fd);
+        return -1;
+    }
+
+    struct jbm_drm_mode_fb_cmd fb;
+    memset(&fb, 0, sizeof(fb));
+    fb.width = mode.hdisplay;
+    fb.height = mode.vdisplay;
+    fb.pitch = dumb.pitch;
+    fb.bpp = 32;
+    fb.depth = 24;
+    fb.handle = dumb.handle;
+    if (jbm_ioctl(fd, DRM_IOCTL_MODE_ADDFB, &fb) != 0 || !fb.fb_id) {
+        jbm_log("jbm: DRM ADDFB failed");
+        jbm_close(fd);
+        return -1;
+    }
+
+    if (drm_set_crtc(fd, crtc, fb.fb_id, conn_id, &mode) != 0) {
+        jbm_log("jbm: DRM SETCRTC failed");
+        jbm_close(fd);
+        return -1;
+    }
+
+    struct jbm_drm_mode_map_dumb map;
+    memset(&map, 0, sizeof(map));
+    map.handle = dumb.handle;
+    if (jbm_ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &map) != 0) {
+        jbm_log("jbm: DRM MAP_DUMB failed");
+        jbm_close(fd);
+        return -1;
+    }
+    u8 *mem = (u8 *)jbm_mmap((u32)dumb.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (long)map.offset);
+    if (!mem) {
+        jbm_log("jbm: DRM mmap failed (err %d)", jbm_mmap_err);
+        jbm_close(fd);
+        return -1;
+    }
+    u8 *cv = (u8 *)jbm_mmap(dumb.pitch * mode.vdisplay, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (!cv) {
+        jbm_close(fd);
+        return -1;
+    }
+
+    G.fd = fd;
+    G.mem = mem;
+    G.cv = cv;
+    G.stride = dumb.pitch;
+    G.len = (u32)dumb.size;
+    G.w = mode.hdisplay;
+    G.h = mode.vdisplay;
+    G.bpp = 32;
+    G.ro = 16;
+    G.rl = 8;
+    G.go = 8;
+    G.gl = 8;
+    G.bo = 0;
+    G.bl = 8;
+    G.to = 0;
+    G.tl = 0;
+    G.rot = 0;
+    G.is_drm = 1;
+    G.drm_crtc = crtc;
+    G.drm_fb = fb.fb_id;
+    G.drm_mode = mode;
+    G.ok = 1;
+    jbm_log("jbm: DRM %ux%u pitch=%u crtc=%u fb=%u", G.w, G.h, G.stride, crtc, fb.fb_id);
     return 0;
 }
 
@@ -778,6 +2404,10 @@ static int gfx_open(void) {
  * stay invisible and the panel keeps showing the previous screen forever. */
 static void gfx_reapply(void) {
     if (!G.ok) return;
+    if (G.is_drm) {
+        drm_set_crtc(G.fd, G.drm_crtc, G.drm_fb, 0, &G.drm_mode);
+        return;
+    }
     struct jbm_fb_var var;
     memset(&var, 0, sizeof(var));
     i64 g = jbm_ioctl(G.fd, FBIOGET_VSCREENINFO, &var);
@@ -790,6 +2420,11 @@ static void gfx_reapply(void) {
 
 static void gfx_kick(void) {
     if (!G.ok) return;
+    if (G.is_drm) {
+        drm_set_crtc(G.fd, G.drm_crtc, G.drm_fb, 0, &G.drm_mode);
+        jbm_log("jbm: drm kick (setcrtc)");
+        return;
+    }
     struct jbm_fb_var var;
     memset(&var, 0, sizeof(var));
     i64 g = jbm_ioctl(G.fd, FBIOGET_VSCREENINFO, &var);
@@ -799,6 +2434,61 @@ static void gfx_kick(void) {
     jbm_sleep_ms(250);
     i64 b0 = jbm_ioctl(G.fd, FBIOBLANK, (void *)0);
     jbm_log("jbm: gfx kick get=%d put=%d blank1=%d blank0=%d", (int)g, (int)p, (int)b1, (int)b0);
+}
+
+/* Automatic display detection:
+ *   prefer_drm=1 -> KMS first, framebuffer as fallback when fallback_to_fb=1;
+ *   otherwise    -> framebuffer first (polled while the driver registers a new
+ *                   node), then KMS as a last resort.
+ * Returns 0 when a backend is ready. */
+static int gfx_detect(void) {
+    if (JBM_CFG.prefer_drm) {
+        jbm_log("jbm: prefer_drm set, probing KMS first");
+        if (drm_open_init() == 0) return 0;
+        if (!JBM_CFG.fallback_to_fb) {
+            jbm_log("jbm: KMS failed and fallback_to_fb=0");
+            return -1;
+        }
+    }
+
+    int fb = 0;
+    int last_err = -1;
+    i64 t_first = jbm_now_ms();
+    for (int i = 0; i < 400; i++) {
+        gfx_quiet = (i != 0);
+        if (gfx_open() == 0) {
+            fb = 1;
+            jbm_log("jbm: fb ready after %lld ms (attempt %d)", (long long)(jbm_now_ms() - t_first), i);
+            break;
+        }
+        if (gfx_err != last_err) {
+            jbm_log("jbm: fb attempt %d failed (err %d)", i, gfx_err);
+            last_err = gfx_err;
+        } else if (i % 40 == 39) {
+            jbm_log("jbm: fb still unavailable after %lld ms (err %d)",
+                    (long long)(jbm_now_ms() - t_first), gfx_err);
+        }
+        jbm_sleep_ms(50);
+    }
+    gfx_quiet = 0;
+    if (fb) return 0;
+
+    jbm_log("jbm: framebuffer unavailable after %lld ms, probing KMS",
+            (long long)(jbm_now_ms() - t_first));
+    if (drm_open_init() == 0) return 0;
+
+    jbm_log("jbm: no display backend available");
+    return -1;
+}
+
+/* Effective screen rotation in degrees; orientation=-1 means "follow the
+ * rotation the framebuffer driver reports". */
+static int jbm_orient_deg(void) {
+    int o = JBM_CFG.orientation;
+    if (o < 0) o = (G.rot & 3) * 90;
+    o %= 360;
+    if (o < 0) o += 360;
+    return o;
 }
 
 /* Drawing colours are ARGB (0xAARRGGBB); these literals are written RGBA
@@ -1172,6 +2862,18 @@ static int touch_open(void) {
         if (jbm_str_has(nm, "proximity")) score -= 60;
         if (mt) score += 10;
 
+        /* input_device pins the node: either an exact /dev path or a substring
+         * of the device name. Anything that does not match is dropped. */
+        if (JBM_CFG.input_device[0]) {
+            int match = (JBM_CFG.input_device[0] == '/') ? (strcmp(node, JBM_CFG.input_device) == 0)
+                                                        : jbm_str_has(nm, JBM_CFG.input_device);
+            if (!match) {
+                jbm_close(fd);
+                continue;
+            }
+            score += 1000;
+        }
+
         if (score > best_score) {
             if (best_fd >= 0) jbm_close(best_fd);
             best_fd = fd;
@@ -1193,16 +2895,29 @@ static int touch_open(void) {
         T.x1 = bax.maximum;
         T.y0 = bay.minimum;
         T.y1 = bay.maximum;
+        /* config.ini can override the raw ranges for panels whose ABS axes do
+         * not span the full digitizer. */
+        if (JBM_CFG.touch_cal_x0 >= 0 && JBM_CFG.touch_cal_x1 > JBM_CFG.touch_cal_x0) {
+            T.x0 = JBM_CFG.touch_cal_x0;
+            T.x1 = JBM_CFG.touch_cal_x1;
+        }
+        if (JBM_CFG.touch_cal_y0 >= 0 && JBM_CFG.touch_cal_y1 > JBM_CFG.touch_cal_y0) {
+            T.y0 = JBM_CFG.touch_cal_y0;
+            T.y1 = JBM_CFG.touch_cal_y1;
+        }
         T.sx = (int)G.w / 2;
         T.sy = (int)G.h / 2;
-        jbm_log("jbm: touch=%s x[%d..%d] y[%d..%d] %s score=%d", best_nm[0] ? best_nm : "(noname)",
-                T.x0, T.x1, T.y0, T.y1, T.mt ? "mt" : "abs", best_score);
+        jbm_log("jbm: touch=%s x[%d..%d] y[%d..%d] %s score=%d orient=%d", best_nm[0] ? best_nm : "(noname)",
+                T.x0, T.x1, T.y0, T.y1, T.mt ? "mt" : "abs", best_score, jbm_orient_deg());
         return 1;
     }
     jbm_log("jbm: no usable touchscreen (event nodes with ABS axes)");
     return 0;
 }
 
+/* Maps the raw digitizer point to screen coordinates and applies the configured
+ * rotation: 90 = content turned clockwise, so the touch vector is rotated with
+ * it. Screen space is X right / Y down. */
 static void touch_map(void) {
     i64 rx = (i64)T.x1 - T.x0, ry = (i64)T.y1 - T.y0;
     if (rx <= 0 || ry <= 0) return;
@@ -1211,10 +2926,18 @@ static void touch_map(void) {
     if (ax > T.x1) ax = T.x1;
     if (ay < T.y0) ay = T.y0;
     if (ay > T.y1) ay = T.y1;
-    i64 sx = ((ax - T.x0) * ((i64)G.w - 1)) / rx;
-    i64 sy = ((ay - T.y0) * ((i64)G.h - 1)) / ry;
-    T.sx = (int)sx;
-    T.sy = (int)sy;
+
+    /* Normalised 0..65535 so the rotation does not lose precision. */
+    i64 u = ((ax - T.x0) * 65535) / rx;
+    i64 v = ((ay - T.y0) * 65535) / ry;
+    switch (jbm_orient_deg()) {
+        case 90: { i64 nu = v, nv = 65535 - u; u = nu; v = nv; break; }
+        case 180: u = 65535 - u; v = 65535 - v; break;
+        case 270: { i64 nu = 65535 - v, nv = u; u = nu; v = nv; break; }
+        default: break;
+    }
+    T.sx = (int)((u * ((i64)G.w - 1)) / 65535);
+    T.sy = (int)((v * ((i64)G.h - 1)) / 65535);
 }
 
 static void touch_poll(void) {
@@ -1287,57 +3010,150 @@ static void touch_poll(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/* actions                                                             */
+/* actions (menu entries)                                              */
 /* ------------------------------------------------------------------ */
 
-#define ACT_COUNT 6
+/* Legacy action order, still the order of the built-in entries. */
 enum { ACT_SYSTEM, ACT_RECOVERY, ACT_FASTBOOT, ACT_DOWNLOAD, ACT_REBOOT, ACT_POWEROFF };
 
-static const char *act_label[ACT_COUNT] = {"System",      "Recovery",   "Fastboot",
-                                           "Download",    "Reboot",     "Power off"};
+static int act_n(void) { return JBM_NUM_ENTRIES; }
+
+static jbm_entry_type_t act_type(int i) {
+    if (i < 0 || i >= JBM_NUM_ENTRIES) return JBM_ENTRY_TYPE_SYSTEM;
+    return JBM_ENTRIES[i].type;
+}
+
+static const char *act_name(int i) {
+    if (i < 0 || i >= JBM_NUM_ENTRIES) return "?";
+    return JBM_ENTRIES[i].name[0] ? JBM_ENTRIES[i].name : "?";
+}
+
+#ifdef JBM_HOST
+/* Used by the host preview to pick built-in entries by type. */
+static int jbm_find_type(jbm_entry_type_t t) {
+    for (int i = 0; i < JBM_NUM_ENTRIES; i++)
+        if (JBM_ENTRIES[i].type == t) return i;
+    return 0;
+}
+#endif
 
 static void enter_download_mode(void) {
     /* On this platform there is no known userspace trigger for the MTK download
-     * (ODIN) mode. The Download action now reboots with the reason "download"
-     * via LINUX_REBOOT_CMD_RESTART2; whether the A22 5G bootloader acts on that
-     * reason has not been validated on hardware.
-     */
+     * (ODIN) mode. The Download action reboots with the reason "download" via
+     * LINUX_REBOOT_CMD_RESTART2; whether the bootloader acts on that reason has
+     * not been validated on hardware. */
     jbm_log("jbm: requesting download mode (reboot reason 'download')");
 }
 
 static void act_system(char **argv, char **envp, const char *why);
 
-static void perform(int idx, char **argv, char **envp) {
-    switch (idx) {
-        case ACT_SYSTEM:
+/* Runs a user entry from /cache/Jupiter. Absolute paths only, no traversal;
+ * the child execve()s the program directly (no shell), so the arguments are
+ * passed verbatim. Returns 0 to go back to the menu. */
+static int jbm_run_entry(int idx, char **argv, char **envp) {
+    jbm_entry_t *e = &JBM_ENTRIES[idx];
+    if (e->path[0] != '/' || jbm_str_has(e->path, "..")) {
+        jbm_log("jbm: refusing entry '%s': path must be absolute and free of '..'", e->path);
+        return 0;
+    }
+    int fd = jbm_open(e->path, O_RDONLY, 0);
+    if (fd < 0) {
+        jbm_log("jbm: entry '%s' not readable (err %d)", e->path, -fd);
+        return 0;
+    }
+    jbm_close(fd);
+    jbm_fchmod(e->path, 0755); /* adb push does not set +x */
+
+    static char avbuf[JBM_MAX_ENTRY_ARGS];
+    static char *av[16];
+    jbm_strcpy_(avbuf, e->args, sizeof(avbuf));
+    int ac = 0;
+    av[ac++] = e->path;
+    char *p = avbuf;
+    while (*p && ac < 15) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        av[ac++] = p;
+        while (*p && *p != ' ') p++;
+        if (*p) *p++ = 0;
+    }
+    av[ac] = 0;
+
+    jbm_log("jbm: running %s entry '%s' (%d args)", e->type == JBM_ENTRY_TYPE_SCRIPT ? "script" : "binary",
+            e->path, ac - 1);
+    jbm_sync_all();
+
+    long pid = jbm_fork();
+    if (pid == 0) {
+#ifdef JBM_HOST
+        execve(e->path, av, envp);
+        _exit(127);
+#else
+        sc6(SYS_execve, (long)e->path, (long)av, (long)envp, 0, 0, 0);
+        /* If execve returned the program was not executable (e.g. a script
+         * whose interpreter is missing); say so via the exit status. */
+        sc1(SYS_exit_group, 127);
+        for (;;) {}
+#endif
+    }
+    if (pid < 0) {
+        jbm_log("jbm: fork failed (%d)", (int)pid);
+        return 0;
+    }
+    int st = 0;
+    int rc = jbm_wait(pid, &st);
+    jbm_log("jbm: '%s' finished rc=%d status=0x%x", e->path, rc, st);
+
+    if (e->behavior_after == 1) act_system(argv, envp, "entry behavior_after=chain");
+    if (e->behavior_after == 2) {
+        jbm_sync_all();
+        jbm_sleep_ms(120);
+        jbm_reboot_cmd(JB_RB_RESTART, 0);
+        for (;;) jbm_sleep_ms(500);
+    }
+    return 0;
+}
+
+/* Runs one menu entry. Reboot/power actions do not return; script/binary
+ * entries return 0 so the main loop can come back to the menu. */
+static int perform(int idx, char **argv, char **envp) {
+    if (idx < 0 || idx >= JBM_NUM_ENTRIES) return 0;
+    switch (act_type(idx)) {
+        case JBM_ENTRY_TYPE_SYSTEM:
             act_system(argv, envp, "user selected System");
-            break;
-        case ACT_RECOVERY:
+            return 1;
+        case JBM_ENTRY_TYPE_RECOVERY:
             jbm_log("jbm: rebooting with reason 'recovery' (no flash write)");
             jbm_sync_all();
             jbm_sleep_ms(120);
             jbm_reboot_cmd(JB_RB_RECOVERY, 0);
             break;
-        case ACT_FASTBOOT:
+        case JBM_ENTRY_TYPE_FASTBOOT:
             jbm_log("jbm: rebooting to bootloader (fastboot)");
             jbm_sleep_ms(120);
             jbm_reboot_cmd(JB_RB_BOOTLOADER, 0);
             break;
-        case ACT_DOWNLOAD:
+        case JBM_ENTRY_TYPE_DOWNLOAD:
             enter_download_mode();
             jbm_sleep_ms(120);
             jbm_reboot_cmd(JB_RB_DOWNLOAD, 0);
             break;
-        case ACT_REBOOT:
+        case JBM_ENTRY_TYPE_REBOOT:
             jbm_log("jbm: rebooting to system");
             jbm_sleep_ms(120);
             jbm_reboot_cmd(JB_RB_RESTART, 0);
             break;
-        default:
+        case JBM_ENTRY_TYPE_POWEROFF:
             jbm_reboot_cmd(JB_RB_POWER_OFF, 0);
             break;
+        case JBM_ENTRY_TYPE_SCRIPT:
+        case JBM_ENTRY_TYPE_BINARY:
+            return jbm_run_entry(idx, argv, envp);
     }
+    /* Reboot/power commands normally do not return; if the syscall bounced,
+     * keep the action screen up rather than spinning back into the menu. */
     for (;;) jbm_sleep_ms(500);
+    return 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1346,6 +3162,7 @@ static void perform(int idx, char **argv, char **envp) {
 
 struct ui {
     int sel;
+    int scroll;    /* first visible entry row (long entry lists scroll) */
     int mode;      /* UI_MENU draws the menu, UI_BOOT/UI_BUSY the action screen */
     int act;       /* which action the action screen is announcing */
     i64 boot_t0;
@@ -1471,8 +3288,46 @@ static void star_field(int stepx, int stepy, int px, int py, int alpha) {
             fill_rect(x, y, 2, 2, ((u32)alpha << 24) | 0xFFFFFF);
 }
 
-/* Space background (base + glow + stars + planet). Rendered once per screen
- * into BG and blitted afterwards: the planet and stars never move. */
+/* Nearest-neighbour blit of the configured background.bmp onto the whole
+ * screen. Alpha in the BMP is honoured by compositing over color_bg. */
+/* Stretches the bitmap to *cover* the screen (preserving aspect ratio, centred,
+ * cropping the overflow) so a non-matching image is never distorted or read out
+ * of bounds. */
+static void jbm_bg_blit(void) {
+    if (!JBM_BG.ok || JBM_BG.w <= 0 || JBM_BG.h <= 0) return;
+    i64 W = (i64)G.w, H = (i64)G.h;
+    i64 sw = JBM_BG.w, sh = JBM_BG.h;
+    i64 winW, winH, offX, offY;
+    if (W * sh >= sw * H) {
+        /* screen is relatively wider: fill width, crop top/bottom */
+        winW = sw;
+        winH = H * sw / W;
+        if (winH < 1) winH = 1;
+        offX = 0;
+        offY = (sh - winH) / 2;
+    } else {
+        winH = sh;
+        winW = W * sh / H;
+        if (winW < 1) winW = 1;
+        offY = 0;
+        offX = (sw - winW) / 2;
+    }
+    for (i64 y = 0; y < H; y++) {
+        i64 sy = offY + y * winH / H;
+        if (sy < 0) sy = 0;
+        if (sy >= sh) sy = sh - 1;
+        u32 *src = JBM_BG.px + (u32)sy * (u32)sw;
+        for (i64 x = 0; x < W; x++) {
+            i64 sx = offX + x * winW / W;
+            if (sx < 0) sx = 0;
+            if (sx >= sw) sx = sw - 1;
+            px((int)x, (int)y, src[sx]);
+        }
+    }
+}
+
+/* Space background (base + glow + stars + planet) or the user bitmap.
+ * Rendered once per screen into BG and blitted afterwards. */
 static u8 *BG;
 static int BG_which = -1;
 
@@ -1482,9 +3337,11 @@ static void draw_space(int which) {
         return;
     }
 
-    fill_rect(0, 0, (int)G.w, (int)G.h, RGBA(0x020202FF));
+    fill_rect(0, 0, (int)G.w, (int)G.h, JBM_FX.color_bg);
 
-    if (which == BG_MENU) {
+    if (JBM_BG.ok) {
+        jbm_bg_blit();
+    } else if (which == BG_MENU) {
         int gx = (int)(0.72f * (float)G.w), gy = (int)(0.45f * (float)G.h);
         radial_glow(gx, gy, farthest_corner(gx, gy) * 38 / 100, 0x643E23, 31);
         star_field(170, 170, 20, 30, 48);
@@ -1526,18 +3383,38 @@ static void draw_space(int which) {
 static void btn_geom(int i, int *x, int *y, int *w, int *h) {
     float k = dk();
     *x = (int)((float)G.w * 0.07f);
-    *w = (int)(430.0f * k);
-    *h = (int)(94.0f * k);
+    *w = (int)((float)JBM_FX.button_width * k);
+    *h = (int)((float)JBM_FX.button_height * k);
     int top = (int)((float)G.h * 0.09f) + (int)(38.0f * k) + (int)(5.0f * k) +
               (int)(45.0f * k); /* brand + empty .device + its margin-bottom */
-    *y = top + i * (*h + (int)(12.0f * k));
+    *y = top + (i - U.scroll) * (*h + (int)((float)JBM_FX.button_spacing * k));
+}
+
+/* Number of rows fully visible below the header, used to bound scrolling. */
+static int visible_rows(void) {
+    float k = dk();
+    int top = (int)((float)G.h * 0.09f) + (int)(38.0f * k) + (int)(5.0f * k) +
+              (int)(45.0f * k);
+    int row = (int)((float)JBM_FX.button_height * k) + (int)((float)JBM_FX.button_spacing * k);
+    int foot = (int)(150.0f * k); /* footer + autoboot readout */
+    int avail = (int)G.h - top - foot;
+    int n = row > 0 ? avail / row : 0;
+    return n < 1 ? 1 : n;
+}
+
+/* Keeps the selected row on screen, scrolling the list when needed. */
+static void ensure_visible(void) {
+    int rows = visible_rows();
+    if (U.sel < U.scroll) U.scroll = U.sel;
+    if (U.sel >= U.scroll + rows) U.scroll = U.sel - rows + 1;
+    if (U.scroll < 0) U.scroll = 0;
 }
 
 static int hit_btn(int px, int py) {
-    for (int i = 0; i < ACT_COUNT; i++) {
+    for (int i = 0; i < act_n(); i++) {
         int x, y, w, h;
         btn_geom(i, &x, &y, &w, &h);
-        if (px >= x && px < x + w && py >= y && py < y + h) return i;
+        if (py >= y && py < y + h && px >= x && px < x + w) return i;
     }
     return -1;
 }
@@ -1570,31 +3447,36 @@ static void draw_ui(void) {
     draw_text_ls(&FN32, nx + measure(&FN32, "Jupiter", bpx, 0), bcy, bpx, 0,
                  RGBA(0xC47B48FF), "Boot", TA_L | VA_M);
 
-    for (int i = 0; i < ACT_COUNT; i++) {
+    for (int i = 0; i < act_n(); i++) {
         int x, y, w, h;
         btn_geom(i, &x, &y, &w, &h);
-        i64 a = elapsed - (60 + i * 55);
+        if (y >= (int)G.h || y + h <= 0) continue; /* scrolled off-screen */
+        i64 a = elapsed - (60 + i * 45 > 320 ? 320 : 60 + i * 45);
         int alpha = a < 0 ? 0 : (a < 260 ? (int)(a * 255 / 260) : 255);
         if (alpha < 6) continue;
         int sel = (i == U.sel);
+        int rr = (int)((float)JBM_FX.button_radius * k);
         if (sel) {
-            grad_rect(x, y, w, h, (int)(7.0f * k), ((u32)(alpha * 56 / 255) << 24) | 0xB86837,
-                      ((u32)(alpha * 6 / 255) << 24) | 0xB86837);
-            round_rect_border(x, y, w, h, (int)(7.0f * k), 1,
-                              ((u32)(alpha * 64 / 255) << 24) | 0xD88A4E);
+            u32 hl = JBM_FX.color_highlight;
+            grad_rect(x, y, w, h, rr, ((u32)(alpha * 56 / 255) << 24) | (hl & 0xFFFFFFu),
+                      ((u32)(alpha * 6 / 255) << 24) | (hl & 0xFFFFFFu));
+            round_rect_border(x, y, w, h, rr, JBM_FX.button_border_width,
+                              ((u32)(alpha * 64 / 255) << 24) | (JBM_FX.color_border & 0xFFFFFFu));
             fill_rect(x, y + (int)(8.0f * k), (int)(2.0f * k) + 1, h - (int)(16.0f * k),
-                      ((u32)alpha << 24) | 0xDF9255);
+                      ((u32)alpha << 24) | (JBM_FX.color_accent & 0xFFFFFFu));
         }
-        char lab[24];
-        up_str(lab, act_label[i], sizeof(lab));
-        u32 tc = ((u32)alpha << 24) | (sel ? 0xFFFFFFu : 0x858585u);
-        draw_text_ls(&FN20, x + (int)(30.0f * k), y + h / 2, 19.0f * k, (int)(2.5f * k), tc, lab,
-                     TA_L | VA_M);
+        char lab[JBM_MAX_ENTRY_NAME];
+        up_str(lab, act_name(i), sizeof(lab));
+        u32 base = sel ? JBM_FX.color_text_sel : JBM_FX.color_text;
+        u32 tc = ((u32)alpha << 24) | (base & 0xFFFFFFu);
+        draw_text_ls(&FN20, x + (int)(30.0f * k), y + h / 2, (float)JBM_FX.text_size * k,
+                     (int)(2.5f * k), tc, lab, TA_L | VA_M);
     }
 
     int x0, y0, w0, h0;
-    btn_geom(ACT_COUNT - 1, &x0, &y0, &w0, &h0);
+    btn_geom(act_n() - 1, &x0, &y0, &w0, &h0);
     int foot_y = y0 + h0 + (int)(34.0f * k);
+    if (foot_y > (int)G.h - (int)(40.0f * k)) foot_y = (int)G.h - (int)(40.0f * k);
 
     /* The autoboot readout used to be a 9px footer line whose ink was only 6px
      * tall, which is unreadable on the 720x1600 panel. It is now a progress bar
@@ -1619,25 +3501,39 @@ static void draw_ui(void) {
         draw_text_ls(&FN20, ix + measure(&FN32, cd, cpx, cls) + (int)(9.0f * k), ty + (int)(7.0f * k),
                      9.0f * k, (int)(1.4f * k), RGBA(0x6E7683FF), "TAP TO CANCEL", TA_L | VA_T);
     } else {
-        char lab[24], msg[72];
-        up_str(lab, act_label[U.sel], sizeof(lab));
+        char lab[JBM_MAX_ENTRY_NAME], msg[128];
+        up_str(lab, act_name(U.sel), sizeof(lab));
         jbm_sn(msg, "%s SELECTED - TAP TO RUN", lab);
         draw_text_ls(&FN20, ix, foot_y, 10.0f * k, (int)(1.6f * k), RGBA(0x6E7683FF), msg,
                      TA_L | VA_T);
     }
 }
 
-/* One-line subtitle per mode, so every action says what it is about to do. */
-static const char *act_sub[ACT_COUNT] = {
-    "Starting Android...", "Requesting recovery reboot...", "Rebooting to bootloader...",
-    "Requesting download mode...", "Restarting device...", "Shutting down..."};
+/* One-line subtitle per entry type, so every action says what it is about to do. */
+static const char *act_sub(int i) {
+    switch (act_type(i)) {
+        case JBM_ENTRY_TYPE_SYSTEM: return "Starting Android...";
+        case JBM_ENTRY_TYPE_RECOVERY: return "Requesting recovery reboot...";
+        case JBM_ENTRY_TYPE_FASTBOOT: return "Rebooting to bootloader...";
+        case JBM_ENTRY_TYPE_DOWNLOAD: return "Requesting download mode...";
+        case JBM_ENTRY_TYPE_REBOOT: return "Restarting device...";
+        case JBM_ENTRY_TYPE_POWEROFF: return "Shutting down...";
+        case JBM_ENTRY_TYPE_SCRIPT: return "Running script...";
+        case JBM_ENTRY_TYPE_BINARY: return "Running program...";
+    }
+    return "";
+}
 
-/* Kicker above the big mode name; "STARTING" only reads well for System. */
+/* Kicker above the big name; "STARTING" only reads well for System. */
 static const char *act_kicker(int idx) {
-    if (idx == ACT_SYSTEM) return "STARTING";
-    if (idx == ACT_REBOOT) return "RESTARTING";
-    if (idx == ACT_POWEROFF) return "SHUTTING DOWN";
-    return "ENTERING";
+    switch (act_type(idx)) {
+        case JBM_ENTRY_TYPE_SYSTEM: return "STARTING";
+        case JBM_ENTRY_TYPE_REBOOT: return "RESTARTING";
+        case JBM_ENTRY_TYPE_POWEROFF: return "SHUTTING DOWN";
+        case JBM_ENTRY_TYPE_SCRIPT:
+        case JBM_ENTRY_TYPE_BINARY: return "RUNNING";
+        default: return "ENTERING";
+    }
 }
 
 /* The screen shown while an action is pending: the boot artwork, the mode name
@@ -1665,8 +3561,8 @@ static void draw_action(int idx) {
     draw_text_ls(&FN32, nx + measure(&FN32, "Jupiter", bpx, bls), bcy, bpx, bls,
                  RGBA(0xC87335FF), "Boot", TA_L | VA_M);
 
-    char big[24];
-    up_str(big, act_label[idx], sizeof(big));
+    char big[JBM_MAX_ENTRY_NAME];
+    up_str(big, act_name(idx), sizeof(big));
 
     int y = by + br * 2 + (int)(130.0f * k); /* .boot-content margin-top (@900px) */
     draw_text_ls(&FN20, ix, y, 17.0f * k, (int)(7.0f * k), RGBA(0xDDDDDDFF), act_kicker(idx),
@@ -1683,11 +3579,11 @@ static void draw_action(int idx) {
     y += line_h(hpx) + (int)(42.0f * k);
 
     /* Shrink the subtitle the same way; "Requesting download mode..." is long. */
+    const char *sub = act_sub(idx);
     float spx = 20.0f * k;
     int savail = (int)G.w - ix - (int)(24.0f * k);
-    while (spx > 11.0f * k && measure(&FN20, act_sub[idx], spx, (int)(5.0f * k)) > savail)
-        spx -= 0.5f * k;
-    draw_text_ls(&FN20, ix, y, spx, (int)(5.0f * k), RGBA(0xDDDDDDFF), act_sub[idx], TA_L | VA_T);
+    while (spx > 11.0f * k && measure(&FN20, sub, spx, (int)(5.0f * k)) > savail) spx -= 0.5f * k;
+    draw_text_ls(&FN20, ix, y, spx, (int)(5.0f * k), RGBA(0xDDDDDDFF), sub, TA_L | VA_T);
     y += line_h(spx) + (int)(48.0f * k);
 
     /* .loader: 70px ring, 6px, 1.15s/turn with a 180 degree coloured arc */
@@ -1713,10 +3609,11 @@ static void draw_action(int idx) {
 static void start_action(int idx) {
     U.sel = idx;
     U.act = idx;
-    U.mode = (idx == ACT_SYSTEM) ? UI_BOOT : UI_BUSY;
+    ensure_visible();
+    U.mode = (act_type(idx) == JBM_ENTRY_TYPE_SYSTEM) ? UI_BOOT : UI_BUSY;
     U.boot_t0 = jbm_now_ms();
     ui_dirty = 1;
-    jbm_log("jbm: action %s confirmed, mode=%d, screen up for %d ms", act_label[idx], U.mode,
+    jbm_log("jbm: action '%s' confirmed, mode=%d, screen up for %d ms", act_name(idx), U.mode,
             U.mode == UI_BOOT ? JBM_BOOT_MS : JBM_ACTION_MS);
 }
 
@@ -1750,6 +3647,8 @@ static void cleanup_and_chain(char **argv, char **envp, const char *why) {
     T.fd = -1;
     if (jbm_klog_fd >= 0) jbm_close(jbm_klog_fd);
     jbm_klog_fd = -1;
+    if (jbm_log_fd >= 0) jbm_close(jbm_log_fd);
+    jbm_log_fd = -1;
     /* TODO(hardware): unmounting /dev before execve may break the Android
      * first-stage init, which can expect /dev to stay populated. The fds above
      * are now closed, so the umount should no longer fail with EBUSY. Needs
@@ -1757,6 +3656,11 @@ static void cleanup_and_chain(char **argv, char **envp, const char *why) {
     jbm_umount("/sys");
     jbm_umount("/proc");
     jbm_umount("/dev");
+    /* /cache only exists because we mounted it; leave the system as we found it. */
+    if (JBM_CACHE_MOUNTED) {
+        jbm_umount("/cache");
+        JBM_CACHE_MOUNTED = 0;
+    }
     jbm_sleep_ms(20);
 #ifdef JBM_HOST
     jbm_log("jbm: host build, would exec %s", JBM_REAL_INIT);
@@ -1820,13 +3724,13 @@ static void host_preview(const char *path, i64 at_ms, int mode) {
     }
     G.ok = 1;
 
-    U.sel = (mode == 1) ? ACT_RECOVERY : ACT_SYSTEM;
-    U.act = (mode == 3) ? ACT_RECOVERY : ACT_SYSTEM;
+    U.sel = (mode == 1) ? jbm_find_type(JBM_ENTRY_TYPE_RECOVERY) : jbm_find_type(JBM_ENTRY_TYPE_SYSTEM);
+    U.act = (mode == 3) ? jbm_find_type(JBM_ENTRY_TYPE_RECOVERY) : jbm_find_type(JBM_ENTRY_TYPE_SYSTEM);
     U.mode = (mode == 2 || mode == 3) ? ((mode == 3) ? UI_BUSY : UI_BOOT) : UI_MENU;
     U.t0 = jbm_now_ms() - at_ms;
     U.boot_t0 = jbm_now_ms() - at_ms;
-    U.countdown_ms = JBM_AUTOBOOT_SEC * 1000;
-    U.countdown_on = JBM_AUTOBOOT_SEC > 0 && mode != 1;
+    U.countdown_ms = (i64)JBM_CFG.menu_timeout_sec * 1000;
+    U.countdown_on = JBM_CFG.show_countdown && JBM_CFG.menu_timeout_sec > 0 && mode != 1;
 
     if (U.mode == UI_MENU) draw_ui();
     else draw_action(U.act);
@@ -1850,9 +3754,198 @@ static void host_preview(const char *path, i64 at_ms, int mode) {
             mode, (long long)((countdown_left() + 999) / 1000));
 }
 
+/* ------------------------------------------------------------------ */
+/* host selftest: parses config/entries/theme/BMP from temp files and  */
+/* checks the values the renderer would use. No device needed.         */
+/* ------------------------------------------------------------------ */
+
+static int st_fail;
+
+static void chk(int cond, const char *what) {
+    fprintf(stderr, "[selftest] %-42s %s\n", what, cond ? "ok" : "FAIL");
+    if (!cond) st_fail++;
+}
+
+static void st_mkdir(const char *p) { (void)mkdir(p, 0755); }
+
+static void st_write(const char *path, const char *text) {
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        fprintf(stderr, "[selftest] cannot write %s\n", path);
+        st_fail++;
+        return;
+    }
+    fputs(text, f);
+    fclose(f);
+}
+
+static int selftest(void) {
+    const char *dir = "/tmp/jbm_selftest";
+    char p[256];
+    st_mkdir("/tmp");
+    st_mkdir(dir);
+    jbm_sn(p, "%s/themes", dir);
+    st_mkdir(p);
+
+    jbm_sn(p, "%s/config.ini", dir);
+    st_write(p,
+             "# JupiterBoot selftest\n"
+             "theme = test\n"
+             "color_accent = #123456\n"
+             "button_width = 500\n"
+             "menu_timeout_sec = 8\n"
+             "show_countdown = 0\n"
+             "prefer_drm = 1\n");
+
+    jbm_sn(p, "%s/themes/test.ini", dir);
+    st_write(p, "color_border = 0xAABBCC\ntext_size = 21\n");
+
+    jbm_sn(p, "%s/entries.ini", dir);
+    st_write(p,
+             "[alpha]\n"
+             "name = Alpha\n"
+             "type = system\n"
+             "order = 2\n"
+             "\n"
+             "[custom]\n"
+             "name = MyScript\n"
+             "type = script\n"
+             "path = /data/jbm/test.sh\n"
+             "args = --verbose run\n"
+             "order = 1\n"
+             "default = 1\n"
+             "\n"
+             "[off]\n"
+             "name = Disabled\n"
+             "type = reboot\n"
+             "order = 0\n"
+             "enabled = 0\n");
+
+    jbm_strcpy_(JBM_ROOT, dir, sizeof(JBM_ROOT));
+    jbm_set_default_config(&JBM_CFG);
+    jbm_load_config(&JBM_CFG);
+    jbm_load_entries();
+    jbm_ensure_default_entries();
+    jbm_build_effects();
+
+    chk(JBM_NUM_ENTRIES == 2, "entries: disabled row dropped (2 left)");
+    chk(JBM_NUM_ENTRIES == 2 && strcmp(JBM_ENTRIES[0].name, "MyScript") == 0, "entries: sorted by order");
+    chk(JBM_NUM_ENTRIES == 2 && JBM_ENTRIES[0].type == JBM_ENTRY_TYPE_SCRIPT, "entries: type parsed");
+    chk(JBM_NUM_ENTRIES == 2 && strcmp(JBM_ENTRIES[0].args, "--verbose run") == 0, "entries: args parsed");
+    chk(jbm_default_entry_index() == 0, "entries: default flag honoured");
+    chk(JBM_CFG.menu_timeout_sec == 8, "config: menu_timeout_sec");
+    chk(JBM_CFG.show_countdown == 0, "config: show_countdown");
+    chk(JBM_CFG.prefer_drm == 1, "config: prefer_drm");
+    chk((JBM_CFG.mask & JBM_K_COLOR_ACCENT) != 0, "config: accent mask set");
+    chk(JBM_FX.color_accent == 0xFF123456u, "fx: accent from config");
+    chk(JBM_FX.color_border == 0xFFAABBCCu, "fx: border from theme");
+    chk(JBM_FX.text_size == 21, "fx: text_size from theme");
+    chk(JBM_FX.button_width == 500, "fx: button_width from config");
+
+    /* 2x2 24-bpp BMP: top row red,green; bottom row blue,white. */
+    jbm_sn(p, "%s/background.bmp", dir);
+    FILE *f = fopen(p, "wb");
+    if (f) {
+        static const u8 hdr[54] = {'B', 'M', 70, 0, 0, 0, 0, 0, 0, 0, 54, 0, 0, 0, 40, 0, 0, 0,
+                                   2, 0, 0, 0, 2, 0, 0, 0, 1, 0, 24, 0, 0, 0, 0, 0, 16, 0, 0, 0,
+                                   0x13, 0x0B, 0, 0, 0x13, 0x0B, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        static const u8 pix[16] = {255, 0, 0, 255, 255, 255, 0, 0, 0, 0, 255, 0, 255, 0, 0, 0};
+        fwrite(hdr, 1, sizeof(hdr), f);
+        fwrite(pix, 1, sizeof(pix), f);
+        fclose(f);
+    }
+    int br = jbm_bg_load(p);
+    chk(br == 0 && JBM_BG.ok, "bmp: loaded");
+    chk(JBM_BG.w == 2 && JBM_BG.h == 2, "bmp: 2x2");
+    chk(JBM_BG.px && JBM_BG.px[0] == 0xFFFF0000u, "bmp: top-left red");
+    chk(JBM_BG.px && JBM_BG.px[3] == 0xFFFFFFFFu, "bmp: bottom-right white");
+
+    /* ---- first-run tree creation in a fresh directory ---- */
+    char root[128], bad[128], envroot[128], ep[256];
+    jbm_sn(root, "/tmp/jbm_tree_%d", (int)getpid());
+    jbm_strcpy_(JBM_ROOT, root, sizeof(JBM_ROOT));
+    JBM_CFG_WRITABLE = 1;
+    jbm_ensure_tree();
+    jbm_generate_defaults();
+    chk(jbm_dir_ok(root), "tree: root created");
+    jbm_sn(p, "%s/themes", root);
+    chk(jbm_dir_ok(p), "tree: themes/ created");
+    jbm_sn(p, "%s/scripts", root);
+    chk(jbm_dir_ok(p), "tree: scripts/ created");
+    jbm_sn(p, "%s/bin", root);
+    chk(jbm_dir_ok(p), "tree: bin/ created");
+    jbm_sn(p, "%s/config.ini", root);
+    chk(jbm_exists(p), "tree: config.ini created");
+    jbm_sn(p, "%s/entries.ini", root);
+    chk(jbm_exists(p), "tree: entries.ini created");
+    jbm_sn(p, "%s/themes/default.ini", root);
+    chk(jbm_exists(p), "tree: themes/default.ini created");
+    jbm_sn(ep, "%s/background.bmp", root);
+    chk(jbm_exists(ep), "tree: background.bmp created");
+
+    /* Generated files must parse back to the built-in defaults. */
+    jbm_load_config(&JBM_CFG);
+    jbm_load_entries();
+    jbm_ensure_default_entries();
+    jbm_build_effects();
+    chk(JBM_NUM_ENTRIES == 6, "tree: 6 default entries parse");
+    chk(JBM_NUM_ENTRIES == 6 && strcmp(JBM_ENTRIES[0].id, "system") == 0, "tree: first entry is system");
+    chk(JBM_CFG.menu_timeout_sec == JBM_AUTOBOOT_SEC, "tree: config default honoured");
+
+    /* The generated background is a valid, loadable BMP. */
+    chk(jbm_bg_load(ep) == 0 && JBM_BG.ok, "tree: default background loads");
+    chk(JBM_BG.w == 180 && JBM_BG.h == 400, "tree: background dimensions");
+
+    /* A user edit must survive a later regeneration. */
+    jbm_sn(p, "%s/config.ini", root);
+    st_write(p, "menu_timeout_sec = 3\nshow_brand = 0\n");
+    jbm_write_default_config();
+    jbm_load_config(&JBM_CFG);
+    chk(JBM_CFG.menu_timeout_sec == 3, "tree: existing config not overwritten");
+    chk(JBM_CFG.show_brand == 0, "tree: existing config value kept");
+
+    /* An invalid bitmap is rejected and leaves the procedural fallback. */
+    jbm_sn(p, "%s/broken.bmp", root);
+    st_write(p, "definitely not a bitmap");
+    chk(jbm_bg_load(p) != 0 && !JBM_BG.ok, "bmp: invalid file rejected");
+
+    /* A root path that is actually a file fails cleanly. */
+    jbm_sn(bad, "/tmp/jbm_badfile_%d", (int)getpid());
+    st_write(bad, "x");
+    char saved_root[128];
+    jbm_strcpy_(saved_root, JBM_ROOT, sizeof(saved_root));
+    jbm_strcpy_(JBM_ROOT, bad, sizeof(JBM_ROOT));
+    jbm_ensure_tree();
+    jbm_generate_defaults();
+    chk(!jbm_dir_ok(bad), "tree: file-instead-of-dir handled");
+    jbm_load_config(&JBM_CFG);
+    chk(JBM_CFG.menu_timeout_sec == JBM_AUTOBOOT_SEC, "tree: defaults after write failure");
+    jbm_strcpy_(JBM_ROOT, saved_root, sizeof(JBM_ROOT));
+
+    /* JUPITER_CONFIG_ROOT wins on the host and triggers creation there. */
+    jbm_sn(envroot, "/tmp/jbm_env_%d", (int)getpid());
+    setenv("JUPITER_CONFIG_ROOT", envroot, 1);
+    jbm_config_init();
+    chk(strcmp(JBM_ROOT, envroot) == 0, "env: JUPITER_CONFIG_ROOT honoured");
+    chk(jbm_dir_ok(envroot), "env: tree created under env root");
+    jbm_sn(p, "%s/entries.ini", envroot);
+    chk(jbm_exists(p), "env: entries.ini created");
+    unsetenv("JUPITER_CONFIG_ROOT");
+    char fb[32];
+    jbm_sn(fb, "#%06x", 0x020202u);
+    chk(strcmp(fb, "#020202") == 0, "fmt: %06x pads to width 6");
+    jbm_sn(fb, "%d/%08x", -5, 0xabu);
+    chk(strcmp(fb, "-5/000000ab") == 0, "fmt: %d and %08x");
+
+    fprintf(stderr, "[selftest] %s (%d failures)\n", st_fail ? "FAILED" : "PASSED", st_fail);
+    return st_fail ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     fprintf(stderr, "[jbm:host] argc=%d argv0=%s\n", argc, argc > 0 ? argv[0] : "-");
     dev_init();
+    if (argc >= 2 && strcmp(argv[1], "--selftest") == 0) return selftest();
+    jbm_config_init();
     if (argc >= 2) {
         i64 at_ms = argc >= 3 ? (i64)atoi(argv[2]) : 0;
         int mode = argc >= 4 ? atoi(argv[3]) : 0;
@@ -1874,42 +3967,32 @@ int jbm_main(int argc, char **argv, char **envp) {
         jbm_log("jbm: mount /sys failed");
     jbm_log("jbm: v%s start argc=%d argv0=%s", JBM_VERSION, argc, argc > 0 && argv ? argv[0] : "-");
 
-    /* The display driver may register fb0 a few seconds after init starts, so
-     * poll for a while instead of giving up after 3 s. */
-    int fb = 0;
-    int last_err = -1;
-    i64 t_first = jbm_now_ms();
-    for (int i = 0; i < 400; i++) {
-        gfx_quiet = (i != 0);
-        if (gfx_open() == 0) {
-            fb = 1;
-            jbm_log("jbm: fb ready after %lld ms (attempt %d)", (long long)(jbm_now_ms() - t_first), i);
-            break;
-        }
-        if (gfx_err != last_err) {
-            jbm_log("jbm: fb attempt %d failed (err %d)", i, gfx_err);
-            last_err = gfx_err;
-        } else if (i % 40 == 39) {
-            jbm_log("jbm: fb still unavailable after %lld ms (err %d)",
-                    (long long)(jbm_now_ms() - t_first), gfx_err);
-        }
-        jbm_sleep_ms(50);
-    }
-    gfx_quiet = 0;
-    if (!fb) {
-        jbm_log("jbm: framebuffer unavailable after %lld ms, booting Android directly",
-                (long long)(jbm_now_ms() - t_first));
-        cleanup_and_chain(argv, envp, "no framebuffer");
-    }
+    /* Bring /cache up (if needed), create any missing default files, and load
+     * config.ini/entries.ini/themes. */
+    jbm_config_init();
+
+    /* Optional background bitmap; falls back to the procedural space scene. */
+    if (JBM_CFG.background_path[0] &&
+        jbm_bg_load(JBM_CFG.background_path) == 0)
+        jbm_log("jbm: background %s (%dx%d)", JBM_CFG.background_path, JBM_BG.w, JBM_BG.h);
+    else
+        jbm_log("jbm: no background bitmap, using built-in scene");
+
+    /* Pick a display backend: framebuffer by default, KMS as fallback (or the
+     * other way round when prefer_drm=1). */
+    if (gfx_detect() != 0)
+        cleanup_and_chain(argv, envp, "no display backend");
+    jbm_log("jbm: display %ux%u backend=%s orient=%d", G.w, G.h, G.is_drm ? "drm" : "fb",
+            jbm_orient_deg());
 
     touch_open();
 
-    U.sel = ACT_SYSTEM;
-    U.act = ACT_SYSTEM;
+    U.sel = jbm_default_entry_index();
+    U.act = U.sel;
     U.mode = UI_MENU;
     U.t0 = jbm_now_ms();
-    U.countdown_ms = JBM_AUTOBOOT_SEC * 1000;
-    U.countdown_on = JBM_AUTOBOOT_SEC > 0;
+    U.countdown_ms = (i64)JBM_CFG.menu_timeout_sec * 1000;
+    U.countdown_on = JBM_CFG.show_countdown && JBM_CFG.menu_timeout_sec > 0;
 
     i64 start = U.t0;
     i64 last_draw = 0;
@@ -1947,7 +4030,7 @@ int jbm_main(int argc, char **argv, char **envp) {
             }
             if (elapsed_ms() >= JBM_INTRO_MS && countdown_left() <= 0) {
                 U.countdown_on = 0;
-                start_action(ACT_SYSTEM);
+                start_action(jbm_default_entry_index());
             }
         }
 
@@ -1959,9 +4042,15 @@ int jbm_main(int argc, char **argv, char **envp) {
             cleanup_and_chain(argv, envp, "boot screen elapsed");
         }
         if (U.mode == UI_BUSY && now - U.boot_t0 >= JBM_ACTION_MS) {
-            jbm_log("jbm: action screen done after %lld ms, running %s", (long long)(now - U.boot_t0),
-                    act_label[U.act]);
-            perform(U.act, argv, envp);
+            jbm_log("jbm: action screen done after %lld ms, running %s",
+                    (long long)(now - U.boot_t0), act_name(U.act));
+            if (perform(U.act, argv, envp) == 0) {
+                /* script/binary finished: come back to the menu */
+                U.mode = UI_MENU;
+                U.countdown_on = 0;
+                U.t0 = jbm_now_ms();
+                ui_dirty = 1;
+            }
         }
 
         if (now - start > (i64)JBM_TOTAL_TIMEOUT_SEC * 1000) {

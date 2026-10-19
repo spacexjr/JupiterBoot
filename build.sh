@@ -84,11 +84,26 @@ for p in ui-preview ui-preview-intro ui-preview-sel ui-booting ui-action; do
   [ -f "$BUILD/$p.ppm" ] && "$MAGICK_BIN" "$BUILD/$p.ppm" "$BUILD/$p.png"
 done
 
+say "running host selftest (config/entries/theme/BMP)"
+"$BUILD/jbm_host" --selftest >/dev/null || die "host selftest failed"
+
 say "unpacking $(basename "$IMG_IN")"
 rm -rf "$UNPACK" "$STAGE" "$VERIFY"
 mkdir -p "$UNPACK"
 ( cd "$UNPACK" && "$MAGISKBOOT" unpack -h "$IMG_IN" >/dev/null )
 [ -f "$UNPACK/ramdisk.cpio" ] || die "boot image has no ramdisk.cpio"
+
+# Image flavour: init_boot images use the same unpack/repack flow; the init
+# rename below works generically. Detect by filename/header only for logging.
+IMG_TYPE="boot"
+base=$(basename "$IMG_IN")
+case "$base" in
+  *init_boot*) IMG_TYPE="init_boot" ;;
+esac
+if [ -f "$UNPACK/header" ] && grep -qi 'init_boot' "$UNPACK/header" 2>/dev/null; then
+  IMG_TYPE="init_boot"
+fi
+say "image type: $IMG_TYPE"
 
 say "preparing staging copy"
 cp -a "$UNPACK" "$STAGE"

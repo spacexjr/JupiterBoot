@@ -1,0 +1,48 @@
+# JupiterBoot menu entries sample.
+# Copy this file (as entries.ini) into the config root alongside config.ini.
+#
+# One [id] section per entry. Disabled entries are skipped. Entries are sorted
+# by `order`. Types: system, recovery, fastboot, download, reboot, poweroff,
+# script, binary.
+#
+# `script`/`binary` entries run via fork()+execve() (no shell, no flash, no
+# kexec). Use absolute paths without `..`. The menu chmods them +x before run.
+# behavior_after: 0 = back to menu, 1 = chain to the real init, 2 = reboot.
+
+[system]
+name = System
+type = system
+order = 0
+enabled = 1
+default = 1
+behavior_after = 1
+
+[recovery]
+name = Recovery
+type = recovery
+order = 1
+enabled = 1
+
+[fastboot]
+name = Fastboot
+type = fastboot
+order = 2
+enabled = 1
+
+[download]
+name = Download (ODIN)
+type = download
+order = 3
+enabled = 1
+
+[reboot]
+name = Reboot
+type = reboot
+order = 4
+enabled = 1
+
+[poweroff]
+name = Power off
+type = poweroff
+order = 5
+enabled = 1

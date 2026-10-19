@@ -1,0 +1,39 @@
+# JupiterBoot runtime configuration sample.
+# Copy this file (as config.ini) into the config root:
+#   /cache/Jupiter/config.ini   (or /Jupiter/config.ini on the ramdisk)
+#
+# Colours are #RRGGBB or 0xRRGGBB; an opaque alpha (0xFF) is added.
+# Only keys present here override the theme; everything else falls back.
+
+theme = default
+
+color_bg = #020202
+color_fg = #20242C
+color_border = #D88A4E
+color_highlight = #B86837
+color_text = #858585
+color_text_sel = #FFFFFF
+color_accent = #C87335
+
+button_width = 430
+button_height = 94
+button_spacing = 12
+button_radius = 7
+text_size = 19
+
+menu_timeout_sec = 15
+default_entry = -1        ; -1 = honour the entry's `default = 1` flag
+show_countdown = 1
+show_brand = 1
+
+orientation = auto        ; 0/90/180/270, or auto (follows fb var.rotate)
+prefer_drm = 0            ; 1 = try KMS first, fb as fallback
+fallback_to_fb = 1        ; if preferred backend fails, try the other
+
+input_device =            ; empty = auto-detect the best touchscreen
+touch_cal_x0 = -1         ; raw-axis overrides (-1 = unused)
+touch_cal_y0 = -1
+touch_cal_x1 = -1
+touch_cal_y1 = -1
+
+log_file = 1              ; append diagnostics to <root>/boot.log

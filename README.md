@@ -227,6 +227,97 @@ Build-time constants can be overridden through environment variables:
 JBM_AUTOBOOT_SEC=10 JBM_VERSION=1.1 ./build.sh
 ```
 
+### Runtime configuration
+
+JupiterBoot reads `config.ini`, `entries.ini`, `themes/*.ini` and an optional
+`background.bmp` from its config root:
+
+* `/cache/Jupiter` — when `/cache` is available and holds Jupiter files.
+* `/Jupiter` (ramdisk) — fallback used when `/cache` is unavailable.
+
+On the first boot the menu creates the whole tree when it is missing:
+`config.ini`, `entries.ini`, `background.bmp`, `themes/default.ini`,
+`scripts/` and `bin/`. Existing files are never overwritten and writes are
+atomic (temp file + rename). If the config root is not writable — for example
+`/cache` did not mount — the failure is logged and the built-in defaults are
+used. Delete one file to regenerate only that default on the next boot.
+
+The generated `background.bmp` is a valid 24-bpp image matching the default
+dark/warm backdrop; deleting it brings back the procedural space scene (which
+also draws the planet).
+
+Sample files live under `config/`; copy them into the config root and edit.
+For host testing, point the menu at a scratch directory — it only writes there
+and never to `/cache` on the PC:
+
+```sh
+JUPITER_CONFIG_ROOT=./testdata/Jupiter ./out/jbm_host
+```
+
+**`config.ini`** — colours are `#RRGGBB` or `0xRRGGBB` (opaque alpha is added
+automatically). `orientation` accepts `0/90/180/270` or `auto` (follows the
+framebuffer's reported rotation, and quarter turns like `1/2/3`).
+
+```ini
+theme = default
+color_bg = #020202
+color_accent = #C87335
+button_width = 430
+button_height = 94
+button_spacing = 12
+button_radius = 7
+text_size = 19
+menu_timeout_sec = 15
+default_entry = -1   ; -1 = honour the entry's `default = 1` flag
+show_countdown = 1
+show_brand = 1
+orientation = auto
+prefer_drm = 0
+fallback_to_fb = 1
+input_device =       ; empty = auto-detect the best touchscreen
+touch_cal_x0 = -1    ; optional raw-axis overrides (-1 = unused)
+log_file = 1
+```
+
+Only keys explicitly present in `config.ini` override the chosen theme; unset
+keys fall back to the theme file, then to built-in defaults.
+
+**`entries.ini`** — one `[id]` section per menu entry:
+
+```ini
+[system]
+name = System
+type = system          ; system | recovery | fastboot | download | reboot | poweroff | script | binary
+order = 0
+enabled = 1
+is_default = 1
+behavior_after = 0   ; 0 = return to menu, 1 = chain to real init, 2 = reboot
+
+[custom]
+name = Meu Script
+type = script
+path = /data/local/tmp/test.sh
+args = --verbose run
+order = 1
+enabled = 1
+default = 1
+behavior_after = 0
+```
+
+`script`/`binary` entries run with `fork()`+`execve()` (no shell, no flashing,
+no kexec). They must use absolute paths without `..`; the menu `chmod +x` them
+before running. After they finish the menu returns unless `behavior_after` says
+otherwise.
+
+**`themes/<name>.ini`** — same colour/metric keys as `config.ini`, applied first
+and then overridden by matching `config.ini` keys.
+
+### Logging
+
+Diagnostics go through `/dev/kmsg` and, when `log_file = 1`, are appended to
+`<config root>/boot.log` (best effort). On the device, read them after boot
+with `adb shell cat /cache/Jupiter/boot.log` (or `/Jupiter/boot.log`).
+
 ---
 
 ## Regenerating the Font
@@ -284,6 +375,26 @@ device. The graphical System starting screen is also working on real hardware.
 Fastboot remains untested. The device can also enter the JupiterBoot UI while
 powered off and charging, which is currently being investigated as a charger/off-mode
 boot path.
+
+### Known issue: `/cache` is not mounted
+
+On the current SM-A225M build the menu does **not** mount `/cache`, so
+`/cache/Jupiter` is never created and the runtime configuration is not loaded
+from there. The boot log shows:
+
+```
+jbm: could not mount /cache, using defaults
+jbm: config root /cache/Jupiter not writable, using built-in defaults
+```
+
+The cache partition itself is valid (`/dev/block/mmcblk0p46`, ext4,
+`PARTNAME=cache`) and Android mounts it normally afterwards. The failure is in
+the menu's early probe: `/sys/class/block` exposes 150 entries on this device
+and `mmcblk0p46` is entry 124, while the scan was capped at 64. A fix (larger
+scan buffer plus identification by `by-name/cache`, `PARTNAME=cache` and the
+ext4 label) is implemented but **not yet validated on hardware**. Until it is
+confirmed, the menu falls back to the built-in defaults and no files are
+written to `/cache/Jupiter`.
 
 ---
 
