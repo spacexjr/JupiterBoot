@@ -1,4 +1,5 @@
-# JupiterBoot
+
+## JupiterBoot
 
 A graphical, touch-driven boot menu injected into the `boot` ramdisk of the
 Samsung Galaxy A22 4G (`SM-A225M` / `a22`).
@@ -17,7 +18,7 @@ The repository does **not** flash the device. The build system only produces
 
 ---
 
-## Features
+### Features
 
 - Graphical framebuffer interface
 - Touchscreen navigation
@@ -34,7 +35,7 @@ The repository does **not** flash the device. The build system only produces
 
 ---
 
-## Boot Flow
+### Boot Flow
 
 1. The bootloader loads `boot.img`.
 2. The kernel starts `/init`.
@@ -50,7 +51,7 @@ If the framebuffer cannot be initialized, JupiterBoot immediately chains to
 
 ---
 
-## Menu Actions
+### Menu Actions
 
 | Action | Hold | Behaviour |
 |---|---:|---|
@@ -65,7 +66,7 @@ Any touchscreen interaction cancels the automatic boot countdown.
 
 ---
 
-## Tested on Real Hardware
+### Tested on Real Hardware
 
 **Samsung Galaxy A22 4G — SM-A225M**
 
@@ -93,7 +94,7 @@ entering this path has not yet been fully identified.
 
 ---
 
-## Safety Model
+### Safety Model
 
 JupiterBoot does not perform partition flashing or modification during normal
 menu operation.
@@ -129,7 +130,7 @@ The `boot` partition is not modified while JupiterBoot is running.
 
 ---
 
-## Restoring the Stock Boot Image
+### Restoring the Stock Boot Image
 
 Earlier JupiterBoot builds could create a backup at:
 
@@ -152,7 +153,7 @@ Samsung flashing method, such as Odin.
 
 ---
 
-## Build Requirements
+### Build Requirements
 
 - `clang`
 - AArch64 target support (`--target=aarch64-linux-gnu`)
@@ -168,7 +169,7 @@ The original `boot.img` must be available in the repository root.
 
 ---
 
-## Building
+### Building
 
 ```sh
 ./build.sh
@@ -196,7 +197,7 @@ The build process **does not flash the device**.
 
 ---
 
-## Build Output
+### Build Output
 
 ```text
 out/
@@ -211,7 +212,7 @@ before flashing.
 
 ---
 
-## UI Preview
+### UI Preview
 
 The build system generates previews using the same drawing code used by the
 JupiterBoot framebuffer interface. This allows the menu to be tested on the
@@ -219,7 +220,7 @@ host before deploying it to the device.
 
 ---
 
-## Configuration
+### Configuration
 
 Build-time constants can be overridden through environment variables:
 
@@ -320,7 +321,7 @@ with `adb shell cat /cache/Jupiter/boot.log` (or `/Jupiter/boot.log`).
 
 ---
 
-## Regenerating the Font
+### Regenerating the Font
 
 ```sh
 python3 tools/gen_font.py
@@ -334,7 +335,7 @@ src/jbm_font.h
 
 ---
 
-## Project Structure
+### Project Structure
 
 ```text
 JupiterBoot/
@@ -351,7 +352,7 @@ JupiterBoot/
 
 ---
 
-## Device
+### Device
 
 | Property | Value |
 |---|---|
@@ -364,7 +365,7 @@ JupiterBoot/
 
 ---
 
-## Current Status
+### Current Status
 
 **JupiterBoot 0.3 — Experimental**
 
@@ -398,7 +399,7 @@ written to `/cache/Jupiter`.
 
 ---
 
-## Disclaimer
+### Disclaimer
 
 This project is intended for development and experimentation.
 
@@ -408,8 +409,260 @@ available before testing.
 
 ---
 
-## Thank You
+# Jupiter — Android Boot Manager
 
-Thanks to everyone testing and contributing to JupiterBoot.
+`com.spacexjr.jupiter` · version 1.0.0 · minSdk 26 (Android 8) · targetSdk 35 · arm64-v8a
 
-**JupiterBoot · Boot Menu Project**
+---
+
+## What the app is
+
+**Jupiter** is the Android app that manages the JupiterBoot boot menu straight
+from the phone — no PC, no fastboot, no typing commands in a terminal. It is a
+Kotlin + Jetpack Compose app built with Material You 3, designed to be operated
+entirely by touch.
+
+From the Android device itself you can:
+
+- **Install** JupiterBoot into the boot image (a real, verified patch).
+- **Edit** the menu entries (`entries.ini`) and visual settings (`config.ini`)
+  through form screens.
+- **Browse** system files with a built-in file manager.
+- **Track** everything through an operation log.
+- **Check for updates** to JupiterBoot via the GitHub API.
+
+All wrapped in a Material You look (dynamic color) with a burgundy-rose planet
+icon.
+
+> **Important:** the app **never** writes directly to physical partitions. The
+> final image stays in the app's private storage until you explicitly export it
+> and flash it yourself (fastboot / recovery).
+
+---
+
+## How to use the app (step by step)
+
+### First launch
+1. Grant **root access** when the app asks (Magisk/KernelSU/APatch).
+2. On the **Home** tab, check that the status shows *root available* and that the
+   bundled binaries were installed (size + hash shown).
+3. Optionally set a **local test root** path to explore without touching the real
+   system.
+
+### Applying the boot patch
+1. Go to the **Patch** tab and tap **Scan**.
+2. The app lists the partitions and picks the target automatically:
+   - only `init_boot` → **HIGH** confidence;
+   - only `boot` → **MEDIUM** confidence;
+   - both → prefers `init_boot` and **asks for your confirmation**;
+   - only `vendor_boot`/unknown → **aborts** with an explanation.
+3. Review the stated reason and confirm.
+4. The app extracts, unpacks, injects `jbm_init`, repacks and **verifies** the
+   image, showing every step.
+5. Use **Export** to save the final image and flash it yourself.
+
+### Editing the boot menu
+- **Entries** tab: add/remove/reorder entries, set the type (`system`,
+  `recovery`, `fastboot`, `script`, `binary`, …), path, arguments, order and
+  which entry is the default. The app validates before writing.
+
+### Adjusting look and behavior
+- **Config** tab: theme, colors (ARGB picker), button size, menu timeout,
+  orientation, display (DRM/FB), logging and touch calibration.
+- Every write creates an **automatic backup**; backups can be restored.
+
+### Managing files
+- **Files** tab: browse folders, view size/permissions/owner, edit text files,
+  create folders, apply `chmod +x`, back up/delete.
+- The app does **not** run scripts silently.
+
+### Tracking and updating
+- **Logs** tab: full history of commands, output and exit codes.
+- **Home → Updates**: queries the latest JupiterBoot release on GitHub.
+
+---
+
+## Features in detail
+
+### Home
+- Root status, local JupiterBoot version, model/device/kernel.
+- State of the bundled binaries (installed, size, SHA-256 hash).
+- Summary of the last executed patch.
+
+### Patch (boot image)
+Staged flow, always with user confirmation:
+
+1. **Scan** of partitions (`/dev/block/by-name`, `bootdevice`, `mapper`).
+2. **Target selection** (`PatchEngine.chooseTarget`):
+   - only `init_boot` → **HIGH** confidence (GKI Android 13+);
+   - only `boot` → **MEDIUM** confidence;
+   - both → prefers `init_boot`, MEDIUM confidence (requires confirmation);
+   - only `vendor_boot` or unknown architecture → **aborts** with an explanation.
+3. **Extraction** with `dd` (10 min timeout) + size and SHA-256 verification.
+4. **Unpack** with `magiskboot unpack -h`.
+5. **Ramdisk inspection** (`init` and `init.system`).
+6. **Integration**: original `/init` → `/init.system`; `jbm_init` → `/init` (0750).
+7. **Repack** + full verification (size, hashes, presence of init).
+8. Optional **export** of the final image to shared storage.
+
+### Entries (entries.ini)
+- Editing of boot menu entries (name, type, path, arguments, order, enabled,
+  default, `behavior_after`).
+- Supported types: `system`, `recovery`, `fastboot`, `download`, `reboot`,
+  `poweroff`, `script`, `binary`.
+- Validation before writing; unknown fields preserved.
+
+### Config (config.ini)
+- Visual editing of theme, colors (ARGB), button metrics, timeout, orientation,
+  display (DRM/FB), logging and touch calibration.
+- Parser faithful to the firmware (colors `#`/`0x`, bools `1/t/y/o`, `auto`→-1).
+- Automatic backup before every write; backup restore.
+
+### Files
+- Filesystem browsing (private test root or system path via root).
+- Text viewing/editing, size/permissions/owner info.
+- `chmod +x`, folder creation, deletion, backup/restore.
+- **Never** runs scripts silently.
+
+### Logs
+- History of every operation (commands, output, exit codes).
+- Persisted to disk; capped at 2000 entries.
+
+---
+
+## Visual identity
+
+The app icon is a **Jupiter-style planet** in burgundy-rose tones with an
+orbital band, matching the app's Material You theme.
+
+| Resource | File |
+|----------|------|
+| Adaptive icon | `res/mipmap-anydpi-v26/ic_launcher.xml` |
+| Foreground layer (planet vector) | `res/drawable/ic_launcher_foreground.xml` |
+| Background color | `res/values/ic_launcher_background.xml` (`#4A1226`) |
+
+The icon uses the *adaptive icon* format (Android 8+): on devices with dynamic
+theming, the system applies the mask and parallax automatically.
+
+---
+
+## Requirements
+
+| Item | Requirement |
+|------|-------------|
+| Android | 8.0 (API 26) or newer |
+| Architecture | arm64-v8a (AArch64) |
+| Root | `su` (Magisk/KernelSU/APatch) for system operations |
+| Space | ~40 MB free on internal storage |
+
+Without root, the app opens and shows diagnostics, but does not patch or edit
+system files.
+
+---
+
+## Code architecture
+
+```
+app/src/main/java/com/spacexjr/jupiter/
+├── core/
+│   ├── shell/       Sh (quoting/validation), ProcessRunner, RootService
+│   ├── log/         OperationLog (StateFlow + persistence)
+│   ├── util/        Hashes, Elf, Versions
+│   ├── config/      IniLines, ConfigIni, EntriesIni (parser/serializer/validator)
+│   ├── store/       ConfigRoot (device via su / local for tests)
+│   ├── binaries/    BinaryInstaller (verify without overwrite)
+│   ├── patch/       PatchEngine, PatchModels, PatchStateStore
+│   ├── update/      GitHubReleaseClient
+│   └── prefs/       AppPrefs
+└── ui/
+    ├── theme/       JupiterLight/JupiterDark + dynamic color
+    ├── components/  StatusCard, InfoRow
+    ├── screens/     Home, Patch, Entries, Config, Files, Logs
+    ├── JupiterViewModel.kt
+    └── JupiterRoot.kt (NavigationBar)
+```
+
+---
+
+## Bundled binaries
+
+Located at `app/src/main/assets/bin/arm64-v8a/` and described in
+`assets/binaries.json`. The hashes are verified by the app before installation.
+
+| Binary | Size | SHA-256 |
+|--------|-----:|---------|
+| `jbm_init` | 892968 | `49ec4df0f2e9ef8d0fc5d7907193d51ea4c1e45affba7f11829b6f779502809a` |
+| `magiskboot` | 788840 | `d7440e2cd89899426e809554bf793baef9804ccbe5a52ce34a8b6242725d3c77` |
+
+- `jbm_init` was compiled from `src/jbm_menu.c` + `src/start.S` of the JupiterBoot
+  repository with `clang --target=aarch64-linux-gnu -ffreestanding -nostdlib
+  -static -fno-builtin -fno-stack-protector -fuse-ld=lld -Os`, then stripped with
+  the NDK's `llvm-strip`.
+- `magiskboot` is a copy of `magiskbootarm64` from the JupiterBoot repository.
+- Licenses: JupiterBoot (jbm_init) and Magisk GPLv3 (magiskboot).
+
+---
+
+## Build
+
+```bash
+# Requirements: JDK 21, Android SDK (platform 36), bundled Gradle Wrapper
+export JAVA_HOME=/path/to/jdk-21
+./gradlew :app:assembleDebug     # debug APK
+./gradlew :app:testDebugUnitTest # unit tests (JVM)
+```
+
+- Gradle 9.3.0 · AGP 9.0.1 (built-in Kotlin) · Kotlin Compose plugin 2.2.10
+- Compose BOM 2025.05.01 · Material 3 1.3.2
+- `compileSdk 36` · `targetSdk 35` · `minSdk 26`
+
+The resulting APK is at `app/build/outputs/apk/debug/app-debug.apk`.
+
+---
+
+## Unit tests
+
+63 JVM tests covering:
+
+- `Versions` — segment-wise numeric comparison (1.10 > 1.9), pre-releases.
+- `Hashes` / `Elf` — known SHA-256, ELF64 AArch64/x86_64 detection.
+- `Sh` — POSIX quoting, `'` escaping, rejection of relative paths/`..`/metacharacters.
+- `ConfigIni` — parser, serializer (in-place + append), validator, JBM values.
+- `EntriesIni` — parser, model, unknown-field preservation, validation.
+- `PatchEngine` — target-selection policy with fake executors.
+- `GitHubReleaseClient` — release JSON parsing.
+
+---
+
+## Security
+
+- All privileged commands are built as `argv` and turned into a single
+  POSIX single-quoted string (`Sh.join`), preventing injection.
+- System paths are validated (`Sh.validateSystemPath`: absolute, no `..`,
+  conservative character set).
+- Binary file transfer device ↔ app via **base64** (read) and **stdin** (atomic
+  write with `tmp` + `mv`).
+- The app **never** executes files downloaded from the internet; it only queries
+  metadata.
+- **Never** writes to physical partitions automatically.
+
+---
+
+## Known limitations
+
+- Requires root; without it, only the local test root is readable.
+- Patch support limited to architectures with recognized `boot`/`init_boot`;
+  standalone `vendor_boot` is not supported.
+- `arm64-v8a` only (AArch64 binaries).
+- Final flashing of the image to the partition is the user's responsibility
+  (fastboot/recovery) — the app builds and verifies the image but does not apply
+  it.
+
+---
+
+## License
+
+The app code follows the JupiterBoot project's license. The bundled binaries keep
+their original licenses (JupiterBoot / Magisk GPLv3).
+
+---

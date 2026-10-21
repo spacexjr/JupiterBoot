@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.spacexjr.jupiter.core.shell.ShTest" tests="12" skipped="0" failures="0" errors="0" timestamp="2026-10-20T21:51:09.177Z" hostname="RMNobara" time="0.003">
+  <properties/>
+  <testcase name="quotesWithSpaces" classname="com.spacexjr.jupiter.core.shell.ShTest" time="0.001"/>
+  <testcase name="joinProducesPosixList" classname="com.spacexjr.jupiter.core.shell.ShTest" time="0.001"/>
+  <testcase name="quotesSimpleWord" classname="com.spacexjr.jupiter.core.shell.ShTest" time="0.0"/>
+  <testcase name="isSuccessReflectsTimeoutAndExitCode" classname="com.spacexjr.jupiter.core.shell.ShTest" time="0.0"/>
+  <testcase name="quoteRejectsNul" classname="com.spacexjr.jupiter.core.shell.ShTest" time="0.0"/>
+  <testcase name="validateRejectsDotDot" classname="com.spacexjr.jupiter.core.shell.ShTest" time="0.001"/>
+  <testcase name="validateAcceptsNormalAbsolutePath" classname="com.spacexjr.jupiter.core.shell.ShTest" time="0.0"/>
+  <testcase name="escapesSingleQuotes" classname="com.spacexjr.jupiter.core.shell.ShTest" time="0.0"/>
+  <testcase name="validateRejectsMetacharacters" classname="com.spacexjr.jupiter.core.shell.ShTest" time="0.0"/>
+  <testcase name="shellMetacharactersStayLiteral" classname="com.spacexjr.jupiter.core.shell.ShTest" time="0.0"/>
+  <testcase name="joinRejectsEmpty" classname="com.spacexjr.jupiter.core.shell.ShTest" time="0.0"/>
+  <testcase name="validateRejectsRelative" classname="com.spacexjr.jupiter.core.shell.ShTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

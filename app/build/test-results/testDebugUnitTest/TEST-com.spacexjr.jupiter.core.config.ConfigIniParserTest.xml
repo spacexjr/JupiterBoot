@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.spacexjr.jupiter.core.config.ConfigIniParserTest" tests="5" skipped="0" failures="0" errors="0" timestamp="2026-10-20T21:51:09.014Z" hostname="RMNobara" time="0.034">
+  <properties/>
+  <testcase name="missingKeysKeepDefaultsAndDoNotSetMask" classname="com.spacexjr.jupiter.core.config.ConfigIniParserTest" time="0.007"/>
+  <testcase name="parsesKnownKeysAndSkipsCommentsAndSections" classname="com.spacexjr.jupiter.core.config.ConfigIniParserTest" time="0.021"/>
+  <testcase name="orientationNumericOneMeansNinety" classname="com.spacexjr.jupiter.core.config.ConfigIniParserTest" time="0.001"/>
+  <testcase name="presentKeysSetMaskBits" classname="com.spacexjr.jupiter.core.config.ConfigIniParserTest" time="0.0"/>
+  <testcase name="emptyTextYieldsDefaults" classname="com.spacexjr.jupiter.core.config.ConfigIniParserTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

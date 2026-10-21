@@ -1,0 +1,27 @@
+{
+  "abi": "arm64-v8a",
+  "jupiterBootVersion": "1.0",
+  "builtFrom": "https://github.com/spacexjr/JupiterBoot",
+  "binaries": [
+    {
+      "name": "magiskboot",
+      "asset": "bin/arm64-v8a/magiskboot",
+      "file": "magiskboot",
+      "version": "build do repositorio JupiterBoot (sem versao embutida)",
+      "size": 788840,
+      "sha256": "d7440e2cd89899426e809554bf793baef9804ccbe5a52ce34a8b6242725d3c77",
+      "executable": true,
+      "license": "Magisk (GPLv3) — binario pre-compilado incluido conforme o repositorio JupiterBoot"
+    },
+    {
+      "name": "jbm_init",
+      "asset": "bin/arm64-v8a/jbm_init",
+      "file": "jbm_init",
+      "version": "1.0",
+      "size": 892968,
+      "sha256": "49ec4df0f2e9ef8d0fc5d7907193d51ea4c1e45affba7f11829b6f779502809a",
+      "executable": true,
+      "license": "JupiterBoot — compilado a partir de src/jbm_menu.c + src/start.S (clang aarch64 freestanding)"
+    }
+  ]
+}

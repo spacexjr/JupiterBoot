@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.spacexjr.jupiter.core.util.ElfTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-10-20T21:51:09.191Z" hostname="RMNobara" time="0.001">
+  <properties/>
+  <testcase name="rejectsShortHeader" classname="com.spacexjr.jupiter.core.util.ElfTest" time="0.001"/>
+  <testcase name="detectsX86_64" classname="com.spacexjr.jupiter.core.util.ElfTest" time="0.0"/>
+  <testcase name="detectsAarch64LittleEndian" classname="com.spacexjr.jupiter.core.util.ElfTest" time="0.0"/>
+  <testcase name="rejectsNonElf" classname="com.spacexjr.jupiter.core.util.ElfTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

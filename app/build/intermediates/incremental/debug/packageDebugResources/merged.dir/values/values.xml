@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">#4A1226</color>
+    <color name="jupiter_window_background">#FBF3F6</color>
+    <string name="app_name">Jupiter</string>
+    <string name="files_title">Arquivos</string>
+    <string name="nav_entries">Entries</string>
+    <string name="nav_home">Início</string>
+    <string name="nav_logs">Logs</string>
+    <string name="nav_settings">Configurações</string>
+    <string name="patch_title">Patch de boot</string>
+    <style name="Theme.Jupiter" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/jupiter_window_background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.spacexjr.jupiter.core.update.GitHubReleaseClientTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-10-20T21:51:09.182Z" hostname="RMNobara" time="0.007">
+  <properties/>
+  <testcase name="fallsBackToRepositoryUrlWhenHtmlUrlMissing" classname="com.spacexjr.jupiter.core.update.GitHubReleaseClientTest" time="0.005"/>
+  <testcase name="parsesTagNameAndAssets" classname="com.spacexjr.jupiter.core.update.GitHubReleaseClientTest" time="0.002"/>
+  <testcase name="handlesMissingAssetsArray" classname="com.spacexjr.jupiter.core.update.GitHubReleaseClientTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
