@@ -56,8 +56,12 @@ class ProcessCommandRunner : CommandRunner {
                 .redirectErrorStream(false)
                 .start()
 
-            val stdoutJob = async { process.inputStream.bufferedReader().readText() }
-            val stderrJob = async { process.errorStream.bufferedReader().readText() }
+            val stdoutJob = async {
+                runCatching { process.inputStream.bufferedReader().use { it.readText() } }.getOrDefault("")
+            }
+            val stderrJob = async {
+                runCatching { process.errorStream.bufferedReader().use { it.readText() } }.getOrDefault("")
+            }
 
             when {
                 stdinBytes != null -> process.outputStream.use { it.write(stdinBytes) }
@@ -70,6 +74,10 @@ class ProcessCommandRunner : CommandRunner {
                 process.destroy()
                 withTimeoutOrNull(2_000) { process.waitFor() }
                 process.destroyForcibly()
+                // Fecha os pipes: filhos que sobreviveram ao kill (ex.: grep em
+                // /dev/kmsg) mantêm stdout/stderr abertos e travariam o await.
+                runCatching { process.inputStream.close() }
+                runCatching { process.errorStream.close() }
             }
             val stdout = stdoutJob.await()
             val stderr = stderrJob.await()

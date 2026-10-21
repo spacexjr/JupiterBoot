@@ -1,6 +1,10 @@
 package com.spacexjr.jupiter.ui
 
 import android.app.Application
+import android.content.ContentValues
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.spacexjr.jupiter.core.binaries.BinaryInstaller
@@ -145,8 +149,8 @@ class JupiterViewModel(app: Application) : AndroidViewModel(app) {
         override suspend fun direct(argv: List<String>, workdir: File?, timeoutMs: Long) =
             runner.runOrError(argv, timeoutMs, workdir)
 
-        override suspend fun root(argv: List<String>, timeoutMs: Long) =
-            rootService.execRoot(argv, timeoutMs).toRunnerResult()
+        override suspend fun root(argv: List<String>, workdir: File?, timeoutMs: Long) =
+            rootService.execRoot(argv, timeoutMs, workdir).toRunnerResult()
     }
 
     private val patchEngine = PatchEngine(
@@ -280,8 +284,10 @@ class JupiterViewModel(app: Application) : AndroidViewModel(app) {
      */
     private suspend fun detectJupiterRunning(): String {
         val initSystem = rootService.rootStat("/init.system")
+        // dmesg termina; ler /dev/kmsg diretamente pode bloquear esperando
+        // novas mensagens do kernel e travar a detecção de root na Home.
         val kmsg = rootService.execRoot(
-            listOf("sh", "-c", "grep -m1 -a jbm /dev/kmsg 2>/dev/null || true"),
+            listOf("sh", "-c", "dmesg 2>/dev/null | grep -m1 -a jbm || true"),
             8_000,
         ).stdout.trim()
         return when {
@@ -314,10 +320,17 @@ class JupiterViewModel(app: Application) : AndroidViewModel(app) {
     // ---------------------------------------------------------------- patch
     fun scanPartitions() {
         viewModelScope.launch {
-            if (!rootService.isRootAvailable()) {
-                _patch.value = _patch.value.copy(error = "Root indisponível: o patch exige su.")
+            // Se o último probe falhou (diálogo negado/timeout), tenta de novo
+            // antes de bloquear o scan.
+            val root = rootService.isRootAvailable() || rootService.isRootAvailable(refresh = true)
+            if (!root) {
+                _home.value = _home.value.copy(rootAvailable = false)
+                _patch.value = _patch.value.copy(
+                    error = "Root indisponível: conceda acesso ao su quando o diálogo aparecer.",
+                )
                 return@launch
             }
+            _home.value = _home.value.copy(rootAvailable = true)
             _patch.value = _patch.value.copy(busy = true, stepLabel = "Identificando partições…", error = null)
             try {
                 val scan = patchEngine.scanPartitions()
@@ -357,6 +370,11 @@ class JupiterViewModel(app: Application) : AndroidViewModel(app) {
             _patch.value = _patch.value.copy(
                 error = "vendor_boot não é suportado como alvo do JupiterBoot.",
             )
+            return
+        }
+        val binariesProblem = binariesProblem()
+        if (binariesProblem != null) {
+            _patch.value = _patch.value.copy(error = binariesProblem)
             return
         }
         viewModelScope.launch(Dispatchers.IO) {
@@ -440,27 +458,74 @@ class JupiterViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun exportPatchedImage(target: File, onDone: (String) -> Unit) {
+    /** Nome usado na exportação: jupiter-MMddyyyy-HHmm.img. */
+    fun exportFileName(now: Date = Date()): String =
+        "jupiter-" + SimpleDateFormat("MMddyyyy-HHmm", Locale.US).format(now) + ".img"
+
+    /**
+     * Exporta a imagem gerada para /sdcard/Download.
+     *
+     * Android 10+ usa MediaStore (sem precisar de permissão de armazenamento);
+     * versões antigas gravam direto em Downloads com WRITE_EXTERNAL_STORAGE.
+     */
+    fun exportPatchedImageToDownloads(onDone: (String) -> Unit) {
         val out = _patch.value.report?.repack?.outputFile ?: run {
-            onDone("Nenhuma imagem para exportar."); return
+            onDone("Nenhuma imagem para exportar.")
+            return
         }
         viewModelScope.launch(Dispatchers.IO) {
-            val ok = try {
-                target.parentFile?.mkdirs()
-                out.copyTo(target, overwrite = true)
-                true
-            } catch (_: Exception) {
-                false
+            val name = exportFileName()
+            val result = try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    exportViaMediaStore(name, out)
+                } else {
+                    exportLegacy(name, out)
+                }
+            } catch (e: Exception) {
+                e.message ?: "falha desconhecida"
             }
             operationLog.append(
-                if (ok) LogLevel.INFO else LogLevel.ERROR,
+                if (result == null) LogLevel.INFO else LogLevel.ERROR,
                 LogSource.PATCH,
-                "exportação da imagem: $target",
+                if (result == null) "imagem exportada: Download/$name" else "falha ao exportar: $result",
             )
             withContext(Dispatchers.Main) {
-                onDone(if (ok) "Imagem exportada: ${target.name}" else "Falha ao exportar a imagem.")
+                onDone(
+                    if (result == null) "Imagem exportada em Download/$name" else "Falha ao exportar: $result",
+                )
             }
         }
+    }
+
+    /** Retorna null em sucesso ou a mensagem de erro. */
+    private fun exportViaMediaStore(name: String, source: File): String? {
+        val resolver = getApplication<Application>().contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: return "MediaStore recusou criar o arquivo"
+        return try {
+            resolver.openOutputStream(uri)?.use { os ->
+                source.inputStream().use { it.copyTo(os) }
+            } ?: return "não foi possível abrir o arquivo de destino"
+            val done = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+            resolver.update(uri, done, null, null)
+            null
+        } catch (e: Exception) {
+            runCatching { resolver.delete(uri, null, null) }
+            e.message ?: "erro ao gravar no MediaStore"
+        }
+    }
+
+    private fun exportLegacy(name: String, source: File): String? {
+        val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        if (!dir.exists() && !dir.mkdirs()) return "não foi possível criar ${dir.absolutePath}"
+        source.copyTo(File(dir, name), overwrite = true)
+        return null
     }
 
     fun clearPatchReport() {
@@ -860,6 +925,21 @@ class JupiterViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ------------------------------------------------------------- helpers
+    /** Diagnóstico rápido antes de iniciar o patch. */
+    private fun binariesProblem(): String? {
+        val magiskboot = File(binariesDir, "magiskboot")
+        val jbmInit = File(binariesDir, "jbm_init")
+        return when {
+            !magiskboot.isFile -> "magiskboot não instalado em ${magiskboot.absolutePath}. " +
+                "Reinstale o APK (ou limpe os dados do app) e atualize a tela inicial."
+            !magiskboot.canExecute() -> "magiskboot está sem permissão de execução. " +
+                "Limpe os dados do app para que os binários sejam reinstalados."
+            !jbmInit.isFile -> "jbm_init não instalado em ${jbmInit.absolutePath}. " +
+                "Reinstale o APK (ou limpe os dados do app) e atualize a tela inicial."
+            else -> null
+        }
+    }
+
     fun binariesSummary(): String {
         val list = _home.value.binaries
         if (list.isEmpty()) return "não verificado"

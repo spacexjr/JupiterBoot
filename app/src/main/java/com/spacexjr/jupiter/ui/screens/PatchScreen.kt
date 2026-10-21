@@ -53,7 +53,6 @@ import com.spacexjr.jupiter.core.patch.TargetKind
 import com.spacexjr.jupiter.ui.JupiterViewModel
 import com.spacexjr.jupiter.ui.components.InfoRow
 import com.spacexjr.jupiter.ui.components.StatusTone
-import java.io.File
 
 object PatchScreen {
     const val ROUTE = "patch"
@@ -64,7 +63,7 @@ object PatchScreen {
 fun PatchScreen(vm: JupiterViewModel, onBack: () -> Unit) {
     val patch by vm.patch.collectAsStateWithLifecycle()
     var confirmRun by remember { mutableStateOf(false) }
-    var exportTarget by remember { mutableStateOf<File?>(null) }
+    var showExportDialog by remember { mutableStateOf(false) }
 
     val context = androidx.compose.ui.platform.LocalContext.current
 
@@ -262,12 +261,7 @@ fun PatchScreen(vm: JupiterViewModel, onBack: () -> Unit) {
                     if (patch.imageReady) {
                         Spacer(Modifier.height(10.dp))
                         androidx.compose.material3.Button(
-                            onClick = {
-                                exportTarget = File(
-                                    context.getExternalFilesDir(null),
-                                    "boot-jbm-${System.currentTimeMillis()}.img",
-                                )
-                            },
+                            onClick = { showExportDialog = true },
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             Icon(Icons.Filled.FileDownload, contentDescription = null)
@@ -318,21 +312,21 @@ fun PatchScreen(vm: JupiterViewModel, onBack: () -> Unit) {
         )
     }
 
-    exportTarget?.let { target ->
+    if (showExportDialog) {
         AlertDialog(
-            onDismissRequest = { exportTarget = null },
+            onDismissRequest = { showExportDialog = false },
             title = { Text("Exportar imagem") },
-            text = { Text("A imagem será salva em:\n\n${target.absolutePath}") },
+            text = { Text("A imagem será salva em:\n\n/sdcard/Download/${vm.exportFileName()}") },
             confirmButton = {
                 TextButton(onClick = {
-                    val t = target
-                    exportTarget = null
-                    vm.exportPatchedImage(t) { }
-                    android.widget.Toast.makeText(context, "Exportação iniciada: ${t.name}", android.widget.Toast.LENGTH_LONG).show()
+                    showExportDialog = false
+                    vm.exportPatchedImageToDownloads { message ->
+                        android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_LONG).show()
+                    }
                 }) { Text("Exportar") }
             },
             dismissButton = {
-                TextButton(onClick = { exportTarget = null }) { Text("Cancelar") }
+                TextButton(onClick = { showExportDialog = false }) { Text("Cancelar") }
             },
         )
     }

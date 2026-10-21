@@ -25,7 +25,7 @@ private class FakeExecutors(
     }
 
     override suspend fun direct(argv: List<String>, workdir: File?, timeoutMs: Long) = respond(argv)
-    override suspend fun root(argv: List<String>, timeoutMs: Long) = respond(argv)
+    override suspend fun root(argv: List<String>, workdir: File?, timeoutMs: Long) = respond(argv)
 
     companion object {
         fun ok(stdout: String = ""): CommandRunner.Result =

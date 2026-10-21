@@ -29,6 +29,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,6 +52,8 @@ fun HomeScreen(
 ) {
     val home by vm.home.collectAsStateWithLifecycle()
     val patch by vm.patch.collectAsStateWithLifecycle()
+
+    LaunchedEffect(Unit) { vm.refreshAll() }
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(

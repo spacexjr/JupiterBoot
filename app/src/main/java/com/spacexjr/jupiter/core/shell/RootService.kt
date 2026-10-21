@@ -21,6 +21,9 @@ class RootService(
     @Volatile
     private var cachedRoot: Boolean? = null
 
+    @Volatile
+    private var resolvedSu: String? = null
+
     /** Executa argv diretamente (sem root). */
     suspend fun exec(
         argv: List<String>,
@@ -41,14 +44,20 @@ class RootService(
         return result
     }
 
-    /** Executa argv via `su -c` com quoting seguro. */
+    /** Executa argv via `su -c` com quoting seguro e diretório de trabalho opcional. */
     suspend fun execRoot(
         argv: List<String>,
         timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+        workdir: File? = null,
         stdin: String? = null,
         stdinBytes: ByteArray? = null,
     ): CommandResult {
-        val suArgv = listOf("su", "-c", Sh.join(argv))
+        val script = if (workdir != null) {
+            "cd ${Sh.quote(workdir.absolutePath)} && ${Sh.join(argv)}"
+        } else {
+            Sh.join(argv)
+        }
+        val suArgv = listOf(resolvedSu ?: "su", "-c", script)
         val result = runner.runOrError(suArgv, timeoutMs, null, stdin, stdinBytes)
             .toCommandResult(suArgv)
         log.append(
@@ -62,14 +71,60 @@ class RootService(
         return result
     }
 
-    /** Retorna true quando `su` responde com uid=0. */
+    /**
+     * Retorna true quando algum `su` responde com uid=0.
+     *
+     * Tenta primeiro `su` do PATH e, se o processo nem chegou a iniciar
+     * (PATH sem /system/bin, por exemplo), os caminhos conhecidos de
+     * Magisk/KernelSU/APatch. O timeout é generoso para dar tempo de o
+     * usuário responder ao diálogo de concessão de root.
+     */
     suspend fun isRootAvailable(refresh: Boolean = false): Boolean {
         if (!refresh) cachedRoot?.let { return it }
-        val result = exec(listOf("su", "-c", "id"), timeoutMs = 8_000)
-        val ok = !result.timedOut && result.exitCode == 0 && result.stdout.contains("uid=0")
-        cachedRoot = ok
-        return ok
+
+        var last: CommandResult? = null
+        for (candidate in SU_CANDIDATES) {
+            if (candidate != "su" && !File(candidate).exists()) continue
+
+            val result = exec(listOf(candidate, "-c", "id"), timeoutMs = ROOT_PROBE_TIMEOUT_MS)
+            last = result
+            when {
+                isUidZero(result) -> {
+                    resolvedSu = candidate
+                    cachedRoot = true
+                    log.append(LogLevel.INFO, LogSource.ROOT, "root disponível via $candidate")
+                    return true
+                }
+                result.timedOut -> {
+                    log.append(
+                        LogLevel.WARN, LogSource.ROOT,
+                        "su ($candidate): diálogo de root não respondido em ${ROOT_PROBE_TIMEOUT_MS / 1000}s",
+                    )
+                    cachedRoot = false
+                    return false
+                }
+                // O binário rodou e recusou/negou: não insiste em outros caminhos.
+                result.exitCode != -1 && result.exitCode != 127 -> {
+                    cachedRoot = false
+                    return false
+                }
+            }
+        }
+
+        log.append(
+            LogLevel.WARN, LogSource.ROOT,
+            "nenhum su funcional encontrado (${last?.stderr ?: "não encontrado"})",
+        )
+        cachedRoot = false
+        return false
     }
+
+    private fun isUidZero(result: CommandResult): Boolean =
+        !result.timedOut && result.exitCode == 0 &&
+            (result.stdout.contains("uid=0") || result.stderr.contains("uid=0"))
+
+    /** Expõe o caminho de su detectado (para diagnóstico na UI). */
+    fun suPath(): String? = resolvedSu
 
     /** Lê um arquivo de sistema como root; null quando ausente/inacessível. */
     suspend fun readRootFile(path: String, timeoutMs: Long = 20_000): String? {
@@ -127,6 +182,18 @@ class RootService(
 
     companion object {
         const val DEFAULT_TIMEOUT_MS = 60_000L
+        const val ROOT_PROBE_TIMEOUT_MS = 30_000L
+
+        private val SU_CANDIDATES = listOf(
+            "su",
+            "/system/bin/su",
+            "/system/xbin/su",
+            "/sbin/su",
+            "/debug_ramdisk/su",
+            "/data/adb/ksu/bin/su",
+            "/data/adb/ap/bin/su",
+            "/data/adb/magisk/su",
+        )
     }
 }
 

@@ -13,7 +13,7 @@ import java.io.File
 /** Executors usados pelo motor: direto (app) e via root. */
 interface PatchExecutors {
     suspend fun direct(argv: List<String>, workdir: File?, timeoutMs: Long): CommandRunner.Result
-    suspend fun root(argv: List<String>, timeoutMs: Long): CommandRunner.Result
+    suspend fun root(argv: List<String>, workdir: File? = null, timeoutMs: Long): CommandRunner.Result
 }
 
 /**
@@ -61,12 +61,12 @@ class PatchEngine(
             }
         }
 
-        val slotA = executors.root(listOf("getprop", "ro.boot.slot_suffix"), 8_000).stdout.trim()
-        val slotB = executors.root(listOf("getprop", "ro.boot.slot"), 8_000).stdout.trim()
+        val slotA = executors.root(listOf("getprop", "ro.boot.slot_suffix"), timeoutMs = 8_000).stdout.trim()
+        val slotB = executors.root(listOf("getprop", "ro.boot.slot"), timeoutMs = 8_000).stdout.trim()
         val slot = slotA.ifEmpty { slotB }
-        val device = executors.root(listOf("getprop", "ro.product.device"), 8_000).stdout.trim()
-        val model = executors.root(listOf("getprop", "ro.product.model"), 8_000).stdout.trim()
-        val platform = executors.root(listOf("getprop", "ro.board.platform"), 8_000).stdout.trim()
+        val device = executors.root(listOf("getprop", "ro.product.device"), timeoutMs = 8_000).stdout.trim()
+        val model = executors.root(listOf("getprop", "ro.product.model"), timeoutMs = 8_000).stdout.trim()
+        val platform = executors.root(listOf("getprop", "ro.board.platform"), timeoutMs = 8_000).stdout.trim()
 
         val partitions = found.values.sortedBy { it.name }
 
@@ -154,7 +154,7 @@ class PatchEngine(
         val imageFile = File(workDir, "boot-stock.img")
         val part = Sh.validateSystemPath(target.partition.linkPath)
 
-        executors.root(listOf("mkdir", "-p", workDir.absolutePath), 10_000)
+        executors.root(listOf("mkdir", "-p", workDir.absolutePath), timeoutMs = 10_000)
 
         val dd = executors.root(
             listOf("dd", "if=$part", "of=${imageFile.absolutePath}", "bs=4096"),
@@ -163,22 +163,22 @@ class PatchEngine(
         if (!dd.isSuccess) {
             throw PatchException("dd falhou: ${dd.stderr.ifBlank { dd.stdout }}")
         }
-        executors.root(listOf("chmod", "0644", imageFile.absolutePath), 10_000)
-        executors.root(listOf("sync"), 15_000)
+        executors.root(listOf("chmod", "0644", imageFile.absolutePath), timeoutMs = 10_000)
+        executors.root(listOf("sync"), timeoutMs = 15_000)
 
         val size = withContext(Dispatchers.IO) { imageFile.length() }
         if (size <= 0L) {
             throw PatchException("extração produziu arquivo vazio")
         }
 
-        val expected = executors.root(listOf("blockdev", "--getsize64", part), 10_000)
+        val expected = executors.root(listOf("blockdev", "--getsize64", part), timeoutMs = 10_000)
             .stdout.trim().toLongOrNull()
 
         if (expected != null && expected > 0 && size != expected) {
             throw PatchException("tamanho lido ($size) difere do tamanho da partição ($expected)")
         }
 
-        val statOut = executors.root(listOf("stat", "-c", "%s", imageFile.absolutePath), 10_000)
+        val statOut = executors.root(listOf("stat", "-c", "%s", imageFile.absolutePath), timeoutMs = 10_000)
         val statSize = statOut.stdout.trim().toLongOrNull()
         if (statSize != null && statSize != size) {
             throw PatchException("stat divergente: $statSize vs $size")
@@ -199,10 +199,31 @@ class PatchEngine(
         )
     }
 
+    /**
+     * Garante que o binário existe e é executável antes de tentar rodá-lo,
+     * evitando o erro opaco do ProcessBuilder ("error=2, No such file or directory").
+     */
+    private fun requireMagiskboot(): File {
+        val mb = magiskboot()
+        if (!mb.isFile) {
+            throw PatchException(
+                "magiskboot não encontrado em ${mb.absolutePath}. " +
+                    "Os binários não foram extraídos: reinstale o APK ou limpe os dados do app.",
+            )
+        }
+        if (!mb.canExecute()) {
+            throw PatchException(
+                "magiskboot sem permissão de execução em ${mb.absolutePath}. " +
+                    "Limpe os dados do app para que os binários sejam reinstalados.",
+            )
+        }
+        return mb
+    }
+
     /** 3. Unpack com magiskboot. */
     suspend fun unpack(workDir: File, image: ExtractedImage): UnpackResult {
-        val mb = magiskboot()
-        val result = executors.direct(
+        val mb = requireMagiskboot()
+        val result = executors.root(
             listOf(mb.absolutePath, "unpack", "-h", image.file.name),
             workdir = workDir,
             timeoutMs = STEP_TIMEOUT_MS,
@@ -239,20 +260,20 @@ class PatchEngine(
 
     /** 4. Inspeciona o ramdisk sem modificá-lo. */
     suspend fun inspectRamdisk(workDir: File): RamdiskInfo {
-        val mb = magiskboot()
-        val hasInit = executors.direct(
-            listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "exists", "init"),
+        val mb = requireMagiskboot()
+        val hasInit = executors.root(
+            listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "exists init"),
             workDir, STEP_TIMEOUT_MS,
         ).exitCode == 0
-        val hasInitSystem = executors.direct(
-            listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "exists", "init.system"),
+        val hasInitSystem = executors.root(
+            listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "exists init.system"),
             workDir, STEP_TIMEOUT_MS,
         ).exitCode == 0
-        val test = executors.direct(
+        val test = executors.root(
             listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "test"),
             workDir, STEP_TIMEOUT_MS,
         )
-        val listing = executors.direct(
+        val listing = executors.root(
             listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "ls"),
             workDir, STEP_TIMEOUT_MS,
         ).stdout.take(8000)
@@ -273,21 +294,21 @@ class PatchEngine(
 
     /** 5. Integração: /init original vira /init.system; jbm_init vira /init. */
     suspend fun installJupiter(workDir: File): InstallResult {
-        val mb = magiskboot()
+        val mb = requireMagiskboot()
         val jbm = jbmInit()
         if (!withContext(Dispatchers.IO) { jbm.isFile }) {
             throw PatchException("binário jbm_init não instalado no app")
         }
 
         var renamed = false
-        val preInitSystem = executors.direct(
-            listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "exists", "init.system"),
+        val preInitSystem = executors.root(
+            listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "exists init.system"),
             workDir, STEP_TIMEOUT_MS,
         ).exitCode == 0
 
         if (!preInitSystem) {
-            val mv = executors.direct(
-                listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "mv", "init", "init.system"),
+            val mv = executors.root(
+                listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "mv init init.system"),
                 workDir, STEP_TIMEOUT_MS,
             )
             if (mv.exitCode != 0) {
@@ -296,23 +317,23 @@ class PatchEngine(
             renamed = true
         }
 
-        val add = executors.direct(
-            listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "add", "0750", "init", jbm.absolutePath),
+        val add = executors.root(
+            listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "add 0750 init ${jbm.absolutePath}"),
             workDir, STEP_TIMEOUT_MS,
         )
         if (add.exitCode != 0) {
             throw PatchException("falha ao instalar jbm_init como /init: ${add.stderr.ifBlank { add.outputText() }}")
         }
 
-        val okInit = executors.direct(
-            listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "exists", "init"),
+        val okInit = executors.root(
+            listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "exists init"),
             workDir, STEP_TIMEOUT_MS,
         ).exitCode == 0
-        val okInitSystem = executors.direct(
-            listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "exists", "init.system"),
+        val okInitSystem = executors.root(
+            listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "exists init.system"),
             workDir, STEP_TIMEOUT_MS,
         ).exitCode == 0
-        val test = executors.direct(
+        val test = executors.root(
             listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "test"),
             workDir, STEP_TIMEOUT_MS,
         )
@@ -338,10 +359,10 @@ class PatchEngine(
 
     /** 6. Repack e verificação completa da imagem gerada. */
     suspend fun repack(workDir: File, image: ExtractedImage): RepackResult {
-        val mb = magiskboot()
+        val mb = requireMagiskboot()
         val out = File(workDir, "boot-jbm.img")
 
-        val repack = executors.direct(
+        val repack = executors.root(
             listOf(mb.absolutePath, "repack", image.file.name, out.name),
             workDir, STEP_TIMEOUT_MS,
         )
@@ -354,8 +375,8 @@ class PatchEngine(
         // Verificação: reabre a saída em um diretório próprio.
         val verifyDir = File(workDir, "verify")
         withContext(Dispatchers.IO) { verifyDir.mkdirs() }
-        val unpackOut = executors.direct(
-            listOf(mb.absolutePath, "unpack", "-h", out.name),
+        val unpackOut = executors.root(
+            listOf(mb.absolutePath, "unpack", "-h", out.absolutePath),
             verifyDir, STEP_TIMEOUT_MS,
         )
         val stagedRamdisk = File(workDir, "ramdisk.cpio")
@@ -370,11 +391,14 @@ class PatchEngine(
 
         // Extrai o /init gerado e compara com o jbm_init instalado.
         withContext(Dispatchers.IO) { File(verifyDir, "init").delete() }
-        executors.direct(
-            listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "extract", "init"),
+        executors.root(
+            listOf(mb.absolutePath, "cpio", "ramdisk.cpio", "extract"),
             verifyDir, STEP_TIMEOUT_MS,
         ) // magiskboot pode retornar 1 mesmo em sucesso; o arquivo é a prova
         val extractedInit = File(verifyDir, "init")
+        // O extract roda como root e preserva 0750 root:root; sem +r o app
+        // não consegue ler o arquivo para conferir o hash.
+        executors.root(listOf("chmod", "0644", extractedInit.absolutePath), timeoutMs = 10_000)
         val initMatches = withContext(Dispatchers.IO) {
             extractedInit.isFile && Hashes.sha256Hex(extractedInit) == Hashes.sha256Hex(jbmInit())
         }

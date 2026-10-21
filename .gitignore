@@ -3,6 +3,29 @@
 *.o
 *.ppm
 
+# Gradle / Android build artifacts
+.gradle/
+build/
+.kotlin/
+app/build/
+*.apk
+*.aab
+*.dex
+*.class
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Local configuration (machine-specific SDK/keystore paths)
+local.properties
+*.jks
+*.keystore
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
 # Extracted / derived working copies (regenerate from boot.img)
 /rd/
 /ksrc/
@@ -17,6 +40,8 @@
 
 # Large vendor blobs / scratch files
 /system.img
+/boot-*.img
+/init_boot-*.img
 /blob.out
 /blob.xz
 /bir.cpio

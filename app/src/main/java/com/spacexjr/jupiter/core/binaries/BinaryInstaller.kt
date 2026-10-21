@@ -92,7 +92,9 @@ class BinaryInstaller(
     private suspend fun ensureOne(spec: BinarySpec): BinaryStatus {
         val target = File(targetDir, spec.file)
 
-        if (!withContext(Dispatchers.IO) { target.exists() }) {
+        val usable = withContext(Dispatchers.IO) { target.isFile && target.length() > 0L }
+        if (!usable) {
+            withContext(Dispatchers.IO) { target.delete() }
             val installed = install(spec, target)
             return installed ?: BinaryStatus(
                 spec = spec,
@@ -107,13 +109,15 @@ class BinaryInstaller(
             if (target.isFile) Hashes.sha256Hex(target) else null
         }
         val elf = withContext(Dispatchers.IO) { if (target.isFile) Elf.inspect(target) else null }
-        val size = withContext(Dispatchers.IO) { target.length() }
 
         val hashOk = hash != null && hash.equals(spec.sha256, ignoreCase = true)
         val elfOk = elf?.isAarch64 == true
 
         return when {
             hashOk && elfOk -> {
+                if (spec.executable && !withContext(Dispatchers.IO) { target.canExecute() }) {
+                    withContext(Dispatchers.IO) { target.setExecutable(true, false) }
+                }
                 val execNow = validateExecution(spec, target)
                 log.append(
                     LogLevel.INFO, LogSource.BINARIES,
@@ -123,9 +127,24 @@ class BinaryInstaller(
                     spec = spec,
                     state = BinaryState.OK,
                     path = target,
-                    detail = "hash e ELF conferem",
+                    detail = if (execNow || spec.name != "magiskboot") "hash e ELF conferem"
+                    else "hash e ELF conferem, mas a execução falhou",
                     elfDescription = elf?.describe,
                     executableNow = execNow,
+                )
+            }
+            !elfOk -> {
+                log.append(
+                    LogLevel.WARN, LogSource.BINARIES,
+                    "${spec.name}: ELF inválido (${elf?.describe}); removendo e reinstalando do asset",
+                )
+                withContext(Dispatchers.IO) { target.delete() }
+                install(spec, target) ?: BinaryStatus(
+                    spec = spec,
+                    state = BinaryState.ERROR,
+                    path = target,
+                    detail = "ELF inválido (${elf?.describe}) e falha ao reinstalar do asset",
+                    elfDescription = elf?.describe,
                 )
             }
             !hashOk -> {
@@ -141,19 +160,13 @@ class BinaryInstaller(
                     elfDescription = elf?.describe,
                 )
             }
-            else -> {
-                log.append(
-                    LogLevel.ERROR, LogSource.BINARIES,
-                    "${spec.name}: ELF inválido (${elf?.describe})",
-                )
-                BinaryStatus(
-                    spec = spec,
-                    state = BinaryState.ERROR,
-                    path = target,
-                    detail = "ELF inválido: ${elf?.describe}",
-                    elfDescription = elf?.describe,
-                )
-            }
+            else -> BinaryStatus(
+                spec = spec,
+                state = BinaryState.ERROR,
+                path = target,
+                detail = "falha desconhecida ao validar o binário",
+                elfDescription = elf?.describe,
+            )
         }
     }
 
@@ -189,11 +202,20 @@ class BinaryInstaller(
             )
         }
         val ok = withContext(Dispatchers.IO) {
+            val tmp = File(target.parentFile, target.name + ".tmp")
             try {
-                target.writeBytes(bytes)
+                target.parentFile?.mkdirs()
+                tmp.writeBytes(bytes)
+                if (spec.executable) tmp.setExecutable(true, false)
+                if (!tmp.renameTo(target)) {
+                    target.delete()
+                    tmp.renameTo(target)
+                }
+                target.setReadable(true, false)
                 if (spec.executable) target.setExecutable(true, false)
-                true
+                target.isFile && target.length() == bytes.size.toLong()
             } catch (_: Exception) {
+                tmp.delete()
                 false
             }
         }
@@ -223,6 +245,13 @@ class BinaryInstaller(
      */
     private suspend fun validateExecution(spec: BinarySpec, target: File): Boolean {
         if (spec.name != "magiskboot") return false
+        if (!target.isFile || !target.canExecute()) {
+            log.append(
+                LogLevel.ERROR, LogSource.BINARIES,
+                "magiskboot exec test: arquivo ausente ou sem +x em $target",
+            )
+            return false
+        }
         val result = runner.runOrError(listOf(target.absolutePath), timeoutMs = 10_000)
         val ran = result.stdout.contains("MagiskBoot", ignoreCase = true) ||
             result.stderr.contains("MagiskBoot", ignoreCase = true) ||
@@ -230,7 +259,8 @@ class BinaryInstaller(
         log.append(
             if (ran) LogLevel.INFO else LogLevel.ERROR,
             LogSource.BINARIES,
-            "magiskboot exec test: exit=${result.exitCode} timedOut=${result.timedOut}",
+            "magiskboot exec test: exit=${result.exitCode} timedOut=${result.timedOut}" +
+                if (ran) "" else " stderr=${result.stderr.take(300)}",
         )
         return ran
     }
