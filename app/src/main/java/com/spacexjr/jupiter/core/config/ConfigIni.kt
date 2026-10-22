@@ -9,13 +9,19 @@ package com.spacexjr.jupiter.core.config
  * mascara de override.
  */
 data class ConfigIni(
+    var configVersion: Int = 2,
     var theme: String = "default",
     var background: String = "",
+    var title: String = "Jupiter",
+    var subtitle: String = "Boot",
     var buttonStyle: Int = 0,
     var colorBg: Int = 0xFF020202.toInt(),
     var colorFg: Int = 0xFF20242C.toInt(),
     var colorBorder: Int = 0xFFD88A4E.toInt(),
     var colorHighlight: Int = 0xFFB86837.toInt(),
+    var colorSelectedBg: Int = 0xFFB86837.toInt(),
+    var colorPressedBg: Int = 0xFFD88A4E.toInt(),
+    var colorDisabledText: Int = 0xFF525862.toInt(),
     var colorText: Int = 0xFF858585.toInt(),
     var colorTextSel: Int = 0xFFFFFFFF.toInt(),
     var colorAccent: Int = 0xFFC87335.toInt(),
@@ -23,7 +29,15 @@ data class ConfigIni(
     var buttonHeight: Int = 94,
     var buttonSpacing: Int = 12,
     var buttonRadius: Int = 7,
+    var buttonBorderWidth: Int = 1,
+    var buttonAlpha: Int = 255,
+    var layoutMargin: Int = 7,
+    var textAlign: Int = 0,
     var textSize: Int = 19,
+    var showTitle: Boolean = true,
+    var showDescription: Boolean = true,
+    var showIcons: Boolean = true,
+    var iconScale: Int = 100,
     var menuTimeoutSec: Int = 15,
     var defaultEntry: Int = -1,
     var showCountdown: Boolean = true,
@@ -54,6 +68,18 @@ data class ConfigIni(
         const val K_BTN_GAP = 0x0200
         const val K_BTN_R = 0x0400
         const val K_TEXT_SIZE = 0x0800
+        const val K_COLOR_SEL_BG = 0x1000
+        const val K_COLOR_PRESSED = 0x2000
+        const val K_COLOR_DISABLED = 0x4000
+        const val K_BTN_BORDER = 0x8000
+        const val K_BTN_ALPHA = 0x10000
+        const val K_LAYOUT_MARGIN = 0x20000
+        const val K_ICON_SCALE = 0x40000
+        const val K_BTN_STYLE = 0x80000
+        const val K_TEXT_ALIGN = 0x100000
+        const val K_SHOW_TITLE = 0x200000
+        const val K_SHOW_DESC = 0x400000
+        const val K_SHOW_ICONS = 0x800000
 
         fun defaults() = ConfigIni()
 
@@ -64,14 +90,28 @@ data class ConfigIni(
             append("# defaults back. Full reference: README.md (Configuration).\n\n")
             append("# Look and feel\n")
             append("theme = default\n")
+            append("config_version = 2\n")
+            append("title = Jupiter\n")
+            append("subtitle = Boot\n")
+            append("show_title = 1\n")
+            append("show_description = 1\n")
+            append("show_icons = 1\n")
+            append("icon_scale = 100\n")
             append("# background = /cache/Jupiter/background.bmp\n")
             append("# Colours/metrics live in themes/default.ini. Uncomment a line\n")
             append("# here to override the theme just for this device.\n")
             append("# button_style = 0\n")
+            append("# button_alpha = 255\n")
+            append("# button_border_width = 1\n")
+            append("# text_align = 0\n")
+            append("# layout_margin = 7\n")
             append("# color_bg = #020202\n")
             append("# color_fg = #20242c\n")
             append("# color_border = #d88a4e\n")
             append("# color_highlight = #b86837\n")
+            append("# color_selected_bg = #b86837\n")
+            append("# color_pressed_bg = #d88a4e\n")
+            append("# color_disabled_text = #525862\n")
             append("# color_text = #858585\n")
             append("# color_text_sel = #ffffff\n")
             append("# color_accent = #c87335\n")
@@ -170,13 +210,24 @@ object ConfigIniParser {
             val key = trimmed.substring(0, eq).trim()
             val value = trimmed.substring(eq + 1).trim()
             when (key) {
+                "config_version" -> c.configVersion = JbmValues.parseInt(value, c.configVersion)
                 "background" -> c.background = value
                 "theme" -> c.theme = value
-                "button_style" -> c.buttonStyle = JbmValues.parseInt(value, c.buttonStyle)
+                "title" -> c.title = value.take(63)
+                "subtitle" -> c.subtitle = value.take(127)
+                "button_style" -> c.buttonStyle = JbmValues.parseInt(value, c.buttonStyle).also { mask = mask or ConfigIni.K_BTN_STYLE }
+                "text_align" -> c.textAlign = JbmValues.parseInt(value, c.textAlign).also { mask = mask or ConfigIni.K_TEXT_ALIGN }
+                "layout_margin" -> c.layoutMargin = JbmValues.parseInt(value, c.layoutMargin).also { mask = mask or ConfigIni.K_LAYOUT_MARGIN }
+                "button_alpha" -> c.buttonAlpha = JbmValues.parseInt(value, c.buttonAlpha).also { mask = mask or ConfigIni.K_BTN_ALPHA }
+                "button_border_width" -> c.buttonBorderWidth = JbmValues.parseInt(value, c.buttonBorderWidth).also { mask = mask or ConfigIni.K_BTN_BORDER }
+                "icon_scale" -> c.iconScale = JbmValues.parseInt(value, c.iconScale).also { mask = mask or ConfigIni.K_ICON_SCALE }
                 "color_bg" -> JbmValues.parseColor(value)?.let { c.colorBg = it; mask = mask or ConfigIni.K_COLOR_BG }
                 "color_fg" -> JbmValues.parseColor(value)?.let { c.colorFg = it; mask = mask or ConfigIni.K_COLOR_FG }
                 "color_border" -> JbmValues.parseColor(value)?.let { c.colorBorder = it; mask = mask or ConfigIni.K_COLOR_BORDER }
                 "color_highlight" -> JbmValues.parseColor(value)?.let { c.colorHighlight = it; mask = mask or ConfigIni.K_COLOR_HL }
+                "color_selected_bg" -> JbmValues.parseColor(value)?.let { c.colorSelectedBg = it; mask = mask or ConfigIni.K_COLOR_SEL_BG }
+                "color_pressed_bg" -> JbmValues.parseColor(value)?.let { c.colorPressedBg = it; mask = mask or ConfigIni.K_COLOR_PRESSED }
+                "color_disabled_text" -> JbmValues.parseColor(value)?.let { c.colorDisabledText = it; mask = mask or ConfigIni.K_COLOR_DISABLED }
                 "color_text" -> JbmValues.parseColor(value)?.let { c.colorText = it; mask = mask or ConfigIni.K_COLOR_TEXT }
                 "color_text_sel" -> JbmValues.parseColor(value)?.let { c.colorTextSel = it; mask = mask or ConfigIni.K_COLOR_TEXTSEL }
                 "color_accent" -> JbmValues.parseColor(value)?.let { c.colorAccent = it; mask = mask or ConfigIni.K_COLOR_ACCENT }
@@ -189,6 +240,9 @@ object ConfigIniParser {
                 "default_entry" -> c.defaultEntry = JbmValues.parseInt(value, c.defaultEntry)
                 "show_countdown" -> c.showCountdown = JbmValues.parseBool(value)
                 "show_brand" -> c.showBrand = JbmValues.parseBool(value)
+                "show_title" -> c.showTitle = JbmValues.parseBool(value).also { mask = mask or ConfigIni.K_SHOW_TITLE }
+                "show_description" -> c.showDescription = JbmValues.parseBool(value).also { mask = mask or ConfigIni.K_SHOW_DESC }
+                "show_icons" -> c.showIcons = JbmValues.parseBool(value).also { mask = mask or ConfigIni.K_SHOW_ICONS }
                 "orientation" -> c.orientation = parseOrientation(value, c.orientation)
                 "input_device" -> c.inputDevice = value
                 "touch_cal_x0" -> c.touchCalX0 = JbmValues.parseInt(value, c.touchCalX0)
@@ -228,43 +282,16 @@ object ConfigIniSerializer {
         if (originalText == null) return renderFull(cfg)
 
         val doc = IniDocument.parse(originalText)
-        val updates = linkedMapOf<String, String>()
-
-        // Sempre define o conjunto completo de chaves gerenciadas; o loop
-        // abaixo so grava no documento as que existem ou as explicitamente
-        // novas (definidas pelo chamador).
-        updates["theme"] = cfg.theme
-        if (cfg.background.isNotEmpty()) updates["background"] = cfg.background
-        updates["menu_timeout_sec"] = cfg.menuTimeoutSec.toString()
-        updates["show_countdown"] = if (cfg.showCountdown) "1" else "0"
-        updates["show_brand"] = if (cfg.showBrand) "1" else "0"
-        updates["default_entry"] = cfg.defaultEntry.toString()
-        updates["orientation"] = if (cfg.orientation == -1) "auto" else cfg.orientation.toString()
-        updates["prefer_drm"] = if (cfg.preferDrm) "1" else "0"
-        updates["fallback_to_fb"] = if (cfg.fallbackToFb) "1" else "0"
-        updates["log_level"] = cfg.logLevel.toString()
-        updates["log_file"] = if (cfg.logFile) "1" else "0"
-        updates["button_style"] = cfg.buttonStyle.toString()
-        updates["color_bg"] = JbmValues.formatColor(cfg.colorBg)
-        updates["color_fg"] = JbmValues.formatColor(cfg.colorFg)
-        updates["color_border"] = JbmValues.formatColor(cfg.colorBorder)
-        updates["color_highlight"] = JbmValues.formatColor(cfg.colorHighlight)
-        updates["color_text"] = JbmValues.formatColor(cfg.colorText)
-        updates["color_text_sel"] = JbmValues.formatColor(cfg.colorTextSel)
-        updates["color_accent"] = JbmValues.formatColor(cfg.colorAccent)
-        updates["button_width"] = cfg.buttonWidth.toString()
-        updates["button_height"] = cfg.buttonHeight.toString()
-        updates["button_spacing"] = cfg.buttonSpacing.toString()
-        updates["button_radius"] = cfg.buttonRadius.toString()
-        updates["text_size"] = cfg.textSize.toString()
-        updates["touch_cal_x0"] = cfg.touchCalX0.toString()
-        updates["touch_cal_y0"] = cfg.touchCalY0.toString()
-        updates["touch_cal_x1"] = cfg.touchCalX1.toString()
-        updates["touch_cal_y1"] = cfg.touchCalY1.toString()
-        if (cfg.inputDevice.isNotEmpty()) updates["input_device"] = cfg.inputDevice
+        val updates = values(cfg)
+        val defaults = values(ConfigIni.defaults())
 
         val existingKeys = doc.topLevelKv().map { it.key }.toSet()
-        val missingKeys = updates.keys.filter { it !in existingKeys }
+        val missingKeys = updates.keys.filter { key ->
+            if (key in existingKeys) return@filter false
+            if (key in ALWAYS_MANAGED) return@filter true
+            val bit = APPEARANCE_BITS[key] ?: 0
+            (cfg.mask and bit != 0) || updates.getValue(key) != defaults.getValue(key)
+        }
 
         // Atualiza chaves existentes.
         for (i in doc.lines.indices) {
@@ -285,15 +312,109 @@ object ConfigIniSerializer {
         return doc.serialize()
     }
 
+    private fun values(cfg: ConfigIni): LinkedHashMap<String, String> = linkedMapOf<String, String>().apply {
+        put("theme", cfg.theme)
+        put("config_version", cfg.configVersion.toString())
+        put("title", cfg.title)
+        put("subtitle", cfg.subtitle)
+        put("show_title", if (cfg.showTitle) "1" else "0")
+        put("show_description", if (cfg.showDescription) "1" else "0")
+        put("show_icons", if (cfg.showIcons) "1" else "0")
+        put("icon_scale", cfg.iconScale.toString())
+        put("text_align", cfg.textAlign.toString())
+        put("layout_margin", cfg.layoutMargin.toString())
+        put("button_alpha", cfg.buttonAlpha.toString())
+        put("button_border_width", cfg.buttonBorderWidth.toString())
+        if (cfg.background.isNotEmpty()) put("background", cfg.background)
+        put("menu_timeout_sec", cfg.menuTimeoutSec.toString())
+        put("show_countdown", if (cfg.showCountdown) "1" else "0")
+        put("show_brand", if (cfg.showBrand) "1" else "0")
+        put("default_entry", cfg.defaultEntry.toString())
+        put("orientation", if (cfg.orientation == -1) "auto" else cfg.orientation.toString())
+        put("prefer_drm", if (cfg.preferDrm) "1" else "0")
+        put("fallback_to_fb", if (cfg.fallbackToFb) "1" else "0")
+        put("log_level", cfg.logLevel.toString())
+        put("log_file", if (cfg.logFile) "1" else "0")
+        put("button_style", cfg.buttonStyle.toString())
+        put("color_bg", JbmValues.formatColor(cfg.colorBg))
+        put("color_fg", JbmValues.formatColor(cfg.colorFg))
+        put("color_border", JbmValues.formatColor(cfg.colorBorder))
+        put("color_highlight", JbmValues.formatColor(cfg.colorHighlight))
+        put("color_selected_bg", JbmValues.formatColor(cfg.colorSelectedBg))
+        put("color_pressed_bg", JbmValues.formatColor(cfg.colorPressedBg))
+        put("color_disabled_text", JbmValues.formatColor(cfg.colorDisabledText))
+        put("color_text", JbmValues.formatColor(cfg.colorText))
+        put("color_text_sel", JbmValues.formatColor(cfg.colorTextSel))
+        put("color_accent", JbmValues.formatColor(cfg.colorAccent))
+        put("button_width", cfg.buttonWidth.toString())
+        put("button_height", cfg.buttonHeight.toString())
+        put("button_spacing", cfg.buttonSpacing.toString())
+        put("button_radius", cfg.buttonRadius.toString())
+        put("text_size", cfg.textSize.toString())
+        put("touch_cal_x0", cfg.touchCalX0.toString())
+        put("touch_cal_y0", cfg.touchCalY0.toString())
+        put("touch_cal_x1", cfg.touchCalX1.toString())
+        put("touch_cal_y1", cfg.touchCalY1.toString())
+        if (cfg.inputDevice.isNotEmpty()) put("input_device", cfg.inputDevice)
+    }
+
+    private val ALWAYS_MANAGED = setOf(
+        "theme", "config_version", "title", "subtitle", "background",
+        "menu_timeout_sec", "show_countdown", "show_brand", "default_entry",
+        "orientation", "prefer_drm", "fallback_to_fb", "log_level", "log_file",
+        "touch_cal_x0", "touch_cal_y0", "touch_cal_x1", "touch_cal_y1", "input_device",
+    )
+
+    private val APPEARANCE_BITS = mapOf(
+        "show_title" to ConfigIni.K_SHOW_TITLE,
+        "show_description" to ConfigIni.K_SHOW_DESC,
+        "show_icons" to ConfigIni.K_SHOW_ICONS,
+        "icon_scale" to ConfigIni.K_ICON_SCALE,
+        "text_align" to ConfigIni.K_TEXT_ALIGN,
+        "layout_margin" to ConfigIni.K_LAYOUT_MARGIN,
+        "button_alpha" to ConfigIni.K_BTN_ALPHA,
+        "button_border_width" to ConfigIni.K_BTN_BORDER,
+        "button_style" to ConfigIni.K_BTN_STYLE,
+        "color_bg" to ConfigIni.K_COLOR_BG,
+        "color_fg" to ConfigIni.K_COLOR_FG,
+        "color_border" to ConfigIni.K_COLOR_BORDER,
+        "color_highlight" to ConfigIni.K_COLOR_HL,
+        "color_selected_bg" to ConfigIni.K_COLOR_SEL_BG,
+        "color_pressed_bg" to ConfigIni.K_COLOR_PRESSED,
+        "color_disabled_text" to ConfigIni.K_COLOR_DISABLED,
+        "color_text" to ConfigIni.K_COLOR_TEXT,
+        "color_text_sel" to ConfigIni.K_COLOR_TEXTSEL,
+        "color_accent" to ConfigIni.K_COLOR_ACCENT,
+        "button_width" to ConfigIni.K_BTN_W,
+        "button_height" to ConfigIni.K_BTN_H,
+        "button_spacing" to ConfigIni.K_BTN_GAP,
+        "button_radius" to ConfigIni.K_BTN_R,
+        "text_size" to ConfigIni.K_TEXT_SIZE,
+    )
+
     private fun renderFull(cfg: ConfigIni): String = buildString {
         append("# JupiterBoot configuration (gerado pelo app Jupiter).\n\n")
         append("theme = ${cfg.theme}\n")
+        append("config_version = ${cfg.configVersion}\n")
+        append("title = ${cfg.title}\n")
+        append("subtitle = ${cfg.subtitle}\n")
+        append("show_title = ${if (cfg.showTitle) 1 else 0}\n")
+        append("show_description = ${if (cfg.showDescription) 1 else 0}\n")
+        append("show_icons = ${if (cfg.showIcons) 1 else 0}\n")
+        append("icon_scale = ${cfg.iconScale}\n")
+        append("text_align = ${cfg.textAlign}\n")
+        append("layout_margin = ${cfg.layoutMargin}\n")
+        append("button_alpha = ${cfg.buttonAlpha}\n")
+        append("button_border_width = ${cfg.buttonBorderWidth}\n")
         if (cfg.background.isNotEmpty()) append("background = ${cfg.background}\n")
         append("button_style = ${cfg.buttonStyle}\n")
         append("color_bg = ${JbmValues.formatColor(cfg.colorBg)}\n")
         append("color_fg = ${JbmValues.formatColor(cfg.colorFg)}\n")
         append("color_border = ${JbmValues.formatColor(cfg.colorBorder)}\n")
         append("color_highlight = ${JbmValues.formatColor(cfg.colorHighlight)}\n")
+        append("color_selected_bg = ${JbmValues.formatColor(cfg.colorSelectedBg)}\n")
+        append("color_pressed_bg = ${JbmValues.formatColor(cfg.colorPressedBg)}\n")
+        append("color_disabled_text = ${JbmValues.formatColor(cfg.colorDisabledText)}\n")
         append("color_text = ${JbmValues.formatColor(cfg.colorText)}\n")
         append("color_text_sel = ${JbmValues.formatColor(cfg.colorTextSel)}\n")
         append("color_accent = ${JbmValues.formatColor(cfg.colorAccent)}\n")
@@ -338,8 +459,26 @@ object ConfigIniValidator {
         if (cfg.buttonSpacing < 0 || cfg.buttonSpacing > 500) {
             issues += Issue("button_spacing", "deve estar entre 0 e 500")
         }
-        if (cfg.buttonRadius < 0 || cfg.buttonRadius > 200) {
-            issues += Issue("button_radius", "deve estar entre 0 e 200")
+        if (cfg.buttonRadius < 0 || cfg.buttonRadius > 400) {
+            issues += Issue("button_radius", "deve estar entre 0 e 400")
+        }
+        if (cfg.buttonBorderWidth < 0 || cfg.buttonBorderWidth > 24) {
+            issues += Issue("button_border_width", "deve estar entre 0 e 24")
+        }
+        if (cfg.buttonAlpha !in 0..255) {
+            issues += Issue("button_alpha", "deve estar entre 0 e 255")
+        }
+        if (cfg.layoutMargin !in 0..35) {
+            issues += Issue("layout_margin", "deve estar entre 0 e 35")
+        }
+        if (cfg.textAlign !in 0..2) {
+            issues += Issue("text_align", "use 0 (esquerda), 1 (centro) ou 2 (direita)")
+        }
+        if (cfg.iconScale !in 50..300) {
+            issues += Issue("icon_scale", "deve estar entre 50 e 300")
+        }
+        if (cfg.configVersion !in 1..2) {
+            issues += Issue("config_version", "formato nao suportado (suportado: 1..2)")
         }
         if (cfg.textSize < 8 || cfg.textSize > 64) {
             issues += Issue("text_size", "deve estar entre 8 e 64")

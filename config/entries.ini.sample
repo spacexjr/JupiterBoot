@@ -8,9 +8,17 @@
 # `script`/`binary` entries run via fork()+execve() (no shell, no flash, no
 # kexec). Use absolute paths without `..`. The menu chmods them +x before run.
 # behavior_after: 0 = back to menu, 1 = chain to the real init, 2 = reboot.
+#
+# Optional per-button appearance (all inherit the theme when omitted):
+#   description, icon (system/recovery/fastboot/download/reboot/power/script)
+#   button_style = 0..3, button_width, button_height, button_radius,
+#   button_border_width, text_align = 0..2, icon_scale = 50..300,
+#   show_icon = 0/1, color_bg, color_border, color_text, color_text_sel
 
 [system]
 name = System
+description = Start Android
+icon = system
 type = system
 order = 0
 enabled = 1

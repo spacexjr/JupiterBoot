@@ -96,6 +96,38 @@ class ConfigIniParserTest {
     fun emptyTextYieldsDefaults() {
         assertEquals(ConfigIni.defaults().copy(), ConfigIniParser.parse(""))
     }
+
+    @Test
+    fun parsesAppearanceKeysAndMasks() {
+        val c = ConfigIniParser.parse(
+            "config_version = 2\ntitle = Nebula\nsubtitle = OS\n" +
+                "show_title = 0\nshow_description = 0\nshow_icons = 1\n" +
+                "icon_scale = 140\ntext_align = 1\nlayout_margin = 11\n" +
+                "button_alpha = 200\nbutton_border_width = 3\nbutton_style = 2\n" +
+                "color_selected_bg = #112233\ncolor_pressed_bg = #445566\n" +
+                "color_disabled_text = #778899\n",
+        )
+        assertEquals(2, c.configVersion)
+        assertEquals("Nebula", c.title)
+        assertEquals("OS", c.subtitle)
+        assertFalse(c.showTitle)
+        assertFalse(c.showDescription)
+        assertEquals(140, c.iconScale)
+        assertEquals(1, c.textAlign)
+        assertEquals(11, c.layoutMargin)
+        assertEquals(200, c.buttonAlpha)
+        assertEquals(3, c.buttonBorderWidth)
+        assertEquals(2, c.buttonStyle)
+        assertEquals(0xFF112233.toInt(), c.colorSelectedBg)
+        assertEquals(0xFF445566.toInt(), c.colorPressedBg)
+        assertEquals(0xFF778899.toInt(), c.colorDisabledText)
+        val expected = ConfigIni.K_SHOW_TITLE or ConfigIni.K_SHOW_DESC or
+            ConfigIni.K_SHOW_ICONS or ConfigIni.K_ICON_SCALE or ConfigIni.K_TEXT_ALIGN or
+            ConfigIni.K_LAYOUT_MARGIN or ConfigIni.K_BTN_ALPHA or ConfigIni.K_BTN_BORDER or
+            ConfigIni.K_BTN_STYLE or ConfigIni.K_COLOR_SEL_BG or ConfigIni.K_COLOR_PRESSED or
+            ConfigIni.K_COLOR_DISABLED
+        assertEquals(expected, c.mask)
+    }
 }
 
 class ConfigIniSerializerTest {
@@ -117,6 +149,24 @@ class ConfigIniSerializerTest {
         val out = ConfigIniSerializer.write(cfg, original)
         assertTrue(out.contains("button_width = 333"))
         assertTrue(out.contains("theme = default"))
+    }
+
+    @Test
+    fun missingAppearanceKeysDoNotOverrideTheme() {
+        val original = "theme = jupiter\n"
+        val out = ConfigIniSerializer.write(ConfigIniParser.parse(original), original)
+        assertFalse(out.contains("button_style ="))
+        assertFalse(out.contains("color_bg ="))
+        assertTrue(out.contains("config_version ="))
+    }
+
+    @Test
+    fun touchedAppearanceKeyIsAppended() {
+        val original = "theme = jupiter\n"
+        val cfg = ConfigIniParser.parse(original)
+            .copy(buttonStyle = 2, mask = ConfigIni.K_BTN_STYLE)
+        val out = ConfigIniSerializer.write(cfg, original)
+        assertTrue(out.contains("button_style = 2"))
     }
 
     @Test
@@ -148,5 +198,22 @@ class ConfigIniValidatorTest {
     @Test
     fun negativeButtonWidthIsFlagged() {
         assertTrue(ConfigIniValidator.validate(ConfigIni.defaults().copy(buttonWidth = -1)).isNotEmpty())
+    }
+
+    @Test
+    fun appearanceOutOfRangeIsFlagged() {
+        val bad = ConfigIni.defaults().copy(
+            buttonAlpha = 999,
+            layoutMargin = 90,
+            textAlign = 7,
+            iconScale = 10,
+            configVersion = 3,
+        )
+        val issues = ConfigIniValidator.validate(bad)
+        assertTrue(issues.any { it.key == "button_alpha" })
+        assertTrue(issues.any { it.key == "layout_margin" })
+        assertTrue(issues.any { it.key == "text_align" })
+        assertTrue(issues.any { it.key == "icon_scale" })
+        assertTrue(issues.any { it.key == "config_version" })
     }
 }

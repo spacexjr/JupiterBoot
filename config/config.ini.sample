@@ -6,11 +6,25 @@
 # Only keys present here override the theme; everything else falls back.
 
 theme = default
+config_version = 2
+
+# Identity (also editable in the app's Appearance tab)
+title = Jupiter
+subtitle = Boot
+show_title = 1
+show_description = 1
+show_icons = 1
+icon_scale = 100
+
+# background = /cache/Jupiter/background.bmp   ; BMP 24-bit
 
 color_bg = #020202
 color_fg = #20242C
 color_border = #D88A4E
 color_highlight = #B86837
+color_selected_bg = #B86837
+color_pressed_bg = #D88A4E
+color_disabled_text = #525862
 color_text = #858585
 color_text_sel = #FFFFFF
 color_accent = #C87335
@@ -19,7 +33,12 @@ button_width = 430
 button_height = 94
 button_spacing = 12
 button_radius = 7
+button_border_width = 1
+button_alpha = 255
 text_size = 19
+text_align = 0             ; 0 left, 1 center, 2 right
+layout_margin = 7          ; percent of screen width, 0..35
+button_style = 0           ; 0 solid, 1 outline, 2 minimal, 3 glass
 
 menu_timeout_sec = 15
 default_entry = -1        ; -1 = honour the entry's `default = 1` flag

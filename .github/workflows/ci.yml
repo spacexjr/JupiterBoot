@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  native-and-jvm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
+
+      - name: Build host engine and run selftest
+        run: |
+          mkdir -p out
+          clang -DJBM_HOST -O2 -Wall -Wextra -Wno-unused-parameter \
+            -o out/jbm_host src/jbm_menu.c
+          out/jbm_host --selftest
+
+      - name: Compile freestanding AArch64 engine
+        run: |
+          clang --target=aarch64-linux-gnu -ffreestanding -nostdlib -static \
+            -fno-builtin -fno-stack-protector -fuse-ld=lld -Os \
+            -Wall -Wextra -Wno-unused-parameter \
+            -DJBM_REAL_INIT='"/init.system"' -DJBM_VERSION='"1.1"' \
+            -DJBM_AUTOBOOT_SEC=15 -DJBM_TOTAL_TIMEOUT_SEC=240 \
+            -o out/jbm_init src/jbm_menu.c src/start.S \
+            -Wl,-e,_start -Wl,--gc-sections
+
+      - name: JVM unit tests
+        run: ./gradlew :app:testDebugUnitTest --console=plain
+
+      - name: Assemble debug APK
+        run: ./gradlew :app:assembleDebug --console=plain

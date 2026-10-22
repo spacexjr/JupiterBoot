@@ -5,12 +5,17 @@
 # Colour/metric keys mirror config.ini; these are applied first, then any
 # matching keys in config.ini override them.
 
-name = default
+# `extends = <theme>` inherits another theme (resolved up to two levels).
+
+button_style = 0
 
 color_bg = #020202
 color_fg = #20242C
 color_border = #D88A4E
 color_highlight = #B86837
+color_selected_bg = #B86837
+color_pressed_bg = #D88A4E
+color_disabled_text = #525862
 color_text = #858585
 color_text_sel = #FFFFFF
 color_accent = #C87335
@@ -20,4 +25,11 @@ button_height = 94
 button_spacing = 12
 button_radius = 7
 button_border_width = 1
+button_alpha = 255
 text_size = 19
+text_align = 0
+layout_margin = 7
+show_title = 1
+show_description = 1
+show_icons = 1
+icon_scale = 100

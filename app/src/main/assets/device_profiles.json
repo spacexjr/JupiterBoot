@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "profiles": [
+    {
+      "id": "generic",
+      "name": "Genérico (detectar automaticamente)",
+      "codename": "",
+      "orientation": 0,
+      "touchCalX0": -1,
+      "touchCalY0": -1,
+      "touchCalX1": -1,
+      "touchCalY1": -1,
+      "notes": "Usa a orientação do painel e a calibração automática do firmware."
+    },
+    {
+      "id": "samsung-r0q",
+      "name": "Samsung Galaxy S22 (r0q)",
+      "codename": "r0q",
+      "orientation": 0,
+      "touchCalX0": -1,
+      "touchCalY0": -1,
+      "touchCalX1": -1,
+      "touchCalY1": -1,
+      "notes": "Perfil de exibição apenas; a calibração de toque continua automática."
+    },
+    {
+      "id": "samsung-b0q",
+      "name": "Samsung Galaxy S22 Ultra (b0q)",
+      "codename": "b0q",
+      "orientation": 0,
+      "touchCalX0": -1,
+      "touchCalY0": -1,
+      "touchCalX1": -1,
+      "touchCalY1": -1,
+      "notes": "Perfil de exibição apenas; a calibração de toque continua automática."
+    },
+    {
+      "id": "samsung-beyond1",
+      "name": "Samsung Galaxy S10 (beyond1)",
+      "codename": "beyond1",
+      "orientation": 0,
+      "touchCalX0": -1,
+      "touchCalY0": -1,
+      "touchCalX1": -1,
+      "touchCalY1": -1,
+      "notes": "Perfil de exibição apenas; a calibração de toque continua automática."
+    },
+    {
+      "id": "samsung-a52q",
+      "name": "Samsung Galaxy A52 (a52q)",
+      "codename": "a52q",
+      "orientation": 0,
+      "touchCalX0": -1,
+      "touchCalY0": -1,
+      "touchCalX1": -1,
+      "touchCalY1": -1,
+      "notes": "Perfil de exibição apenas; a calibração de toque continua automática."
+    }
+  ]
+}

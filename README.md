@@ -165,7 +165,8 @@ Samsung flashing method, such as Odin.
 - Python 3
 - Pillow (only required when regenerating the font)
 
-The original `boot.img` must be available in the repository root.
+The original `boot.img` must be available in the repository root for packaging.
+Host-only builds and the self-test do not need it.
 
 ---
 
@@ -181,17 +182,24 @@ Or specify another boot image:
 ./build.sh path/to/boot.img
 ```
 
-The build process:
+Compile/selftest without a boot image:
 
-1. Builds the host UI preview.
-2. Compiles the freestanding AArch64 JupiterBoot binary.
-3. Verifies that the binary has no undefined symbols.
-4. Unpacks the original `boot.img`.
-5. Renames the original `/init` to `/init.system`.
-6. Installs JupiterBoot as `/init`.
-7. Repacks the boot image.
-8. Verifies the resulting ramdisk and generated `/init`.
-9. Verifies that the final image size is unchanged.
+```sh
+./build.sh --host-only
+```
+
+The full build process:
+
+1. Compiles the freestanding AArch64 JupiterBoot binary.
+2. Verifies that the binary has no undefined symbols.
+3. Builds the host UI preview and renders the preview images.
+4. Runs the host self-test (config/entries/themes/BMP).
+5. Unpacks the original `boot.img`.
+6. Renames the original `/init` to `/init.system`.
+7. Installs JupiterBoot as `/init`.
+8. Repacks the boot image.
+9. Verifies the resulting ramdisk and generated `/init`.
+10. Verifies that the final image size is unchanged.
 
 The build process **does not flash the device**.
 
@@ -258,16 +266,33 @@ JUPITER_CONFIG_ROOT=./testdata/Jupiter ./out/jbm_host
 **`config.ini`** — colours are `#RRGGBB` or `0xRRGGBB` (opaque alpha is added
 automatically). `orientation` accepts `0/90/180/270` or `auto` (follows the
 framebuffer's reported rotation, and quarter turns like `1/2/3`).
+`config_version` is currently `2`; older files are still accepted.
 
 ```ini
 theme = default
+config_version = 2
+title = Jupiter
+subtitle = Boot
+show_title = 1
+show_description = 1
+show_icons = 1
+icon_scale = 100
+background = /cache/Jupiter/background.bmp   ; optional, BMP 24-bit only
 color_bg = #020202
 color_accent = #C87335
+color_selected_bg = #B86837
+color_pressed_bg = #D88A4E
+color_disabled_text = #525862
+button_style = 0     ; 0 solid, 1 outline, 2 minimal, 3 glass
 button_width = 430
 button_height = 94
 button_spacing = 12
 button_radius = 7
+button_border_width = 1
+button_alpha = 255
 text_size = 19
+text_align = 0       ; 0 left, 1 center, 2 right
+layout_margin = 7    ; percent of screen width, 0..35
 menu_timeout_sec = 15
 default_entry = -1   ; -1 = honour the entry's `default = 1` flag
 show_countdown = 1
@@ -281,28 +306,34 @@ log_file = 1
 ```
 
 Only keys explicitly present in `config.ini` override the chosen theme; unset
-keys fall back to the theme file, then to built-in defaults.
+keys fall back to the theme file, then to built-in defaults. This includes the
+appearance keys above, so a theme can define them without being overridden.
 
-**`entries.ini`** — one `[id]` section per menu entry:
+**`entries.ini`** — one `[id]` section per menu entry. Each entry can override
+the visual style of its row; omitted values inherit the theme:
 
 ```ini
 [system]
 name = System
-type = system          ; system | recovery | fastboot | download | reboot | poweroff | script | binary
+description = Start Android
+icon = system        ; system | recovery | fastboot | download | reboot | power | script
+type = system        ; system | recovery | fastboot | download | reboot | poweroff | script | binary
 order = 0
 enabled = 1
-is_default = 1
-behavior_after = 0   ; 0 = return to menu, 1 = chain to real init, 2 = reboot
-
-[custom]
-name = Meu Script
-type = script
-path = /data/local/tmp/test.sh
-args = --verbose run
-order = 1
-enabled = 1
 default = 1
-behavior_after = 0
+behavior_after = 0   ; 0 = return to menu, 1 = chain to real init, 2 = reboot
+# button_style = 3
+# button_width = 600
+# button_height = 110
+# button_radius = 24
+# button_border_width = 2
+# text_align = 1
+# icon_scale = 120
+# show_icon = 1
+# color_bg = #101820
+# color_border = #D88A4E
+# color_text = #B0B0B0
+# color_text_sel = #FFFFFF
 ```
 
 `script`/`binary` entries run with `fork()`+`execve()` (no shell, no flashing,
@@ -311,7 +342,9 @@ before running. After they finish the menu returns unless `behavior_after` says
 otherwise.
 
 **`themes/<name>.ini`** — same colour/metric keys as `config.ini`, applied first
-and then overridden by matching `config.ini` keys.
+and then overridden by matching `config.ini` keys. `extends = <theme>` inherits
+another theme (up to two levels). The firmware generates `default`, `jupiter`,
+`amoled` and `minimal` when the theme tree is first created.
 
 ### Logging
 
@@ -465,10 +498,22 @@ icon.
 - **Entries** tab: add/remove/reorder entries, set the type (`system`,
   `recovery`, `fastboot`, `script`, `binary`, …), path, arguments, order and
   which entry is the default. The app validates before writing.
+- Each entry can also override its own description, icon, button style, size,
+  radius, alignment, icon scale and colors. Omitted values inherit the theme.
 
-### Adjusting look and behavior
+### Adjusting the appearance
+- **Appearance** tab: live preview of the real menu layout (drawing only),
+  title/subtitle, button style (solid/outline/minimal/glass), metrics, colors,
+  text alignment, icons and descriptions.
+- The preview uses the same effective theme + `config.ini` merge rules and the
+  same row geometry as `src/jbm_menu.c`; no boot action can be triggered.
+- **Theme** section lists `themes/*.ini`, supports `extends`, creates and saves
+  themes with an automatic backup.
+- **Background**: pick an image, crop/zoom/rotate it and export a 24-bit BMP as
+  `background.bmp`. The firmware does not load PNG/JPEG, so the conversion is
+  explicit and visible.
 - **Config** tab: theme, colors (ARGB picker), button size, menu timeout,
-  orientation, display (DRM/FB), logging and touch calibration.
+  orientation, display (DRM/FB), logging, touch calibration and device profiles.
 - Every write creates an **automatic backup**; backups can be restored.
 
 ### Managing files
@@ -478,7 +523,14 @@ icon.
 
 ### Tracking and updating
 - **Logs** tab: full history of commands, output and exit codes.
-- **Home → Updates**: queries the latest JupiterBoot release on GitHub.
+- **Home → Updates**: queries the latest release from
+  `https://api.github.com/repos/spacexjr/JupiterBoot/releases/latest`.
+- Downloading and installing `jbm_init` is a separate, confirmed action. The
+  app verifies the asset name, size, that it is an AArch64 ELF and, when the
+  release publishes `jbm_init.sha256`, its SHA-256. It keeps the previous file
+  as a backup and **never executes it** or touches a boot partition.
+- A locally installed update is remembered independently from the bundled
+  asset version, so update checks reflect the version actually installed.
 
 ---
 
@@ -512,9 +564,14 @@ Staged flow, always with user confirmation:
   `poweroff`, `script`, `binary`.
 - Validation before writing; unknown fields preserved.
 
-### Config (config.ini)
-- Visual editing of theme, colors (ARGB), button metrics, timeout, orientation,
-  display (DRM/FB), logging and touch calibration.
+### Appearance
+- Preview + editors for the menu title/subtitle, button styles and per-entry
+  overrides, colors, alignment, icons and descriptions.
+- Theme inheritance (`extends`) resolved up to two levels.
+- Background editor: crop, zoom, rotate and export to 24-bit BMP.
+- **Config** tab: visual editing of theme, colors (ARGB), button metrics,
+  timeout, orientation, display (DRM/FB), logging, touch calibration and
+  device profiles.
 - Parser faithful to the firmware (colors `#`/`0x`, bools `1/t/y/o`, `auto`→-1).
 - Automatic backup before every write; backup restore.
 
@@ -568,11 +625,13 @@ app/src/main/java/com/spacexjr/jupiter/
 │   ├── shell/       Sh (quoting/validation), ProcessRunner, RootService
 │   ├── log/         OperationLog (StateFlow + persistence)
 │   ├── util/        Hashes, Elf, Versions
-│   ├── config/      IniLines, ConfigIni, EntriesIni (parser/serializer/validator)
+│   ├── config/      IniLines, ConfigIni, EntriesIni, ThemeIni, MenuModel
 │   ├── store/       ConfigRoot (device via su / local for tests)
 │   ├── binaries/    BinaryInstaller (verify without overwrite)
+│   ├── device/      DeviceProfile (orientation/touch profiles)
+│   ├── image/       BmpWriter (crop/zoom/rotate, BMP 24-bit)
 │   ├── patch/       PatchEngine, PatchModels, PatchStateStore
-│   ├── update/      GitHubReleaseClient
+│   ├── update/      GitHubReleaseClient, UpdateInstaller
 │   └── prefs/       AppPrefs
 └── ui/
     ├── theme/       JupiterLight/JupiterDark + dynamic color
@@ -622,13 +681,16 @@ The resulting APK is at `app/build/outputs/apk/debug/app-debug.apk`.
 
 ## Unit tests
 
-63 JVM tests covering:
+JVM tests covering:
 
 - `Versions` — segment-wise numeric comparison (1.10 > 1.9), pre-releases.
 - `Hashes` / `Elf` — known SHA-256, ELF64 AArch64/x86_64 detection.
 - `Sh` — POSIX quoting, `'` escaping, rejection of relative paths/`..`/metacharacters.
 - `ConfigIni` — parser, serializer (in-place + append), validator, JBM values.
-- `EntriesIni` — parser, model, unknown-field preservation, validation.
+- `EntriesIni` — parser, model, per-button overrides, unknown-field preservation,
+  validation.
+- `ThemeIni` / `MenuModel` — `extends` resolution, config mask precedence,
+  effective per-entry styles and row geometry.
 - `PatchEngine` — target-selection policy with fake executors.
 - `GitHubReleaseClient` — release JSON parsing.
 
@@ -642,8 +704,9 @@ The resulting APK is at `app/build/outputs/apk/debug/app-debug.apk`.
   conservative character set).
 - Binary file transfer device ↔ app via **base64** (read) and **stdin** (atomic
   write with `tmp` + `mv`).
-- The app **never** executes files downloaded from the internet; it only queries
-  metadata.
+- The app **never executes** files downloaded from the internet. Updates are
+  downloaded only from HTTPS GitHub hosts, checked (ELF + optional SHA-256) and
+  installed as a stored file; boot patching remains an explicit separate step.
 - **Never** writes to physical partitions automatically.
 
 ---

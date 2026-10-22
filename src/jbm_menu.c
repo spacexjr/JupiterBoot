@@ -46,6 +46,8 @@ typedef enum {
 typedef struct {
     char id[32];
     char name[JBM_MAX_ENTRY_NAME];
+    char description[96];
+    char icon[32];
     jbm_entry_type_t type;
     char path[JBM_MAX_ENTRY_PATH];
     char args[JBM_MAX_ENTRY_ARGS];
@@ -55,6 +57,19 @@ typedef struct {
     /* 0: return to the menu after a script/binary finishes (default)
      * 1: chain to the real init    2: reboot */
     int behavior_after;
+    /* Per-button visual overrides. -1 means "inherit the theme". */
+    int button_style;
+    int button_width;
+    int button_height;
+    int button_radius;
+    int button_border_width;
+    int text_align;
+    int icon_scale;
+    int show_icon;
+    u32 color_bg;
+    u32 color_border;
+    u32 color_text;
+    u32 color_text_sel;
 } jbm_entry_t;
 
 /* Bits for jbm_config_t.mask: keys that were explicitly present in
@@ -71,16 +86,34 @@ typedef struct {
 #define JBM_K_BTN_GAP 0x0200u
 #define JBM_K_BTN_R 0x0400u
 #define JBM_K_TEXT_SIZE 0x0800u
+#define JBM_K_COLOR_SEL_BG 0x1000u
+#define JBM_K_COLOR_PRESSED 0x2000u
+#define JBM_K_COLOR_DISABLED 0x4000u
+#define JBM_K_BTN_BORDER 0x8000u
+#define JBM_K_BTN_ALPHA 0x10000u
+#define JBM_K_LAYOUT_MARGIN 0x20000u
+#define JBM_K_ICON_SCALE 0x40000u
+#define JBM_K_BTN_STYLE 0x80000u
+#define JBM_K_TEXT_ALIGN 0x100000u
+#define JBM_K_SHOW_TITLE 0x200000u
+#define JBM_K_SHOW_DESC 0x400000u
+#define JBM_K_SHOW_ICONS 0x800000u
 
 typedef struct {
     u32 mask; /* JBM_K_* bits set by keys found in config.ini */
+    int config_version;
     char background_path[JBM_MAX_CONFIG_VALUE];
     char theme_name[JBM_MAX_THEME_NAME];
+    char title[64];
+    char subtitle[128];
     int button_style;
     u32 color_bg;
     u32 color_fg;
     u32 color_border;
     u32 color_highlight;
+    u32 color_selected_bg;
+    u32 color_pressed_bg;
+    u32 color_disabled_text;
     u32 color_text;
     u32 color_text_sel;
     u32 color_accent;
@@ -88,7 +121,15 @@ typedef struct {
     int button_height;
     int button_spacing;
     int button_radius;
+    int button_border_width;
+    int button_alpha; /* 0..255, background fill opacity */
     int text_size;
+    int text_align; /* 0 left, 1 center, 2 right */
+    int layout_margin; /* percent of screen width, 0..40 */
+    int show_title;
+    int show_description;
+    int show_icons;
+    int icon_scale; /* percent, 50..300 */
     int menu_timeout_sec;
     int default_entry; /* index into the entry list, -1 = use entry flag */
     int show_countdown;
@@ -104,11 +145,15 @@ typedef struct {
 
 typedef struct {
     char name[JBM_MAX_THEME_NAME];
+    char extends[JBM_MAX_THEME_NAME];
     int button_style;
     u32 color_bg;
     u32 color_fg;
     u32 color_border;
     u32 color_highlight;
+    u32 color_selected_bg;
+    u32 color_pressed_bg;
+    u32 color_disabled_text;
     u32 color_text;
     u32 color_text_sel;
     u32 color_accent;
@@ -117,7 +162,14 @@ typedef struct {
     int button_spacing;
     int button_radius;
     int button_border_width;
+    int button_alpha;
     int text_size;
+    int text_align;
+    int layout_margin;
+    int show_title;
+    int show_description;
+    int show_icons;
+    int icon_scale;
 } jbm_theme_t;
 
 static jbm_config_t JBM_CFG;
@@ -150,6 +202,10 @@ struct jbm_timespec {
 #ifndef JBM_TOTAL_TIMEOUT_SEC
 #define JBM_TOTAL_TIMEOUT_SEC 240
 #endif
+
+/* Current on-disk configuration format. config.ini can carry a
+ * `config_version` key; older files are accepted and migrated in memory. */
+#define JBM_CONFIG_VERSION 2
 
 /* Duration of the entry slide-in animation, in ms. */
 #define JBM_INTRO_MS 480
@@ -930,20 +986,35 @@ static int jbm_exists(const char *path) {
 
 static void jbm_set_default_config(jbm_config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
+    cfg->config_version = JBM_CONFIG_VERSION;
     jbm_strcpy_(cfg->theme_name, "default", sizeof(cfg->theme_name));
+    jbm_strcpy_(cfg->title, "Jupiter", sizeof(cfg->title));
+    jbm_strcpy_(cfg->subtitle, "Boot", sizeof(cfg->subtitle));
     cfg->mask = 0;
     cfg->color_bg = 0xFF020202;
     cfg->color_fg = 0xFF20242C;
     cfg->color_border = 0xFFD88A4E;
     cfg->color_highlight = 0xFFB86837;
+    cfg->color_selected_bg = 0xFFB86837;
+    cfg->color_pressed_bg = 0xFFD88A4E;
+    cfg->color_disabled_text = 0xFF525862;
     cfg->color_text = 0xFF858585;
     cfg->color_text_sel = 0xFFFFFFFF;
     cfg->color_accent = 0xFFC87335;
+    cfg->button_style = 0;
     cfg->button_width = 430;
     cfg->button_height = 94;
     cfg->button_spacing = 12;
     cfg->button_radius = 7;
+    cfg->button_border_width = 1;
+    cfg->button_alpha = 255;
     cfg->text_size = 19;
+    cfg->text_align = 0;
+    cfg->layout_margin = 7;
+    cfg->show_title = 1;
+    cfg->show_description = 1;
+    cfg->show_icons = 1;
+    cfg->icon_scale = 100;
     cfg->menu_timeout_sec = JBM_AUTOBOOT_SEC;
     cfg->default_entry = -1;
     cfg->show_countdown = 1;
@@ -966,6 +1037,9 @@ static void jbm_set_default_theme(jbm_theme_t *theme) {
     theme->color_fg = 0xFF20242C;
     theme->color_border = 0xFFD88A4E;
     theme->color_highlight = 0xFFB86837;
+    theme->color_selected_bg = 0xFFB86837;
+    theme->color_pressed_bg = 0xFFD88A4E;
+    theme->color_disabled_text = 0xFF525862;
     theme->color_text = 0xFF858585;
     theme->color_text_sel = 0xFFFFFFFF;
     theme->color_accent = 0xFFC87335;
@@ -974,7 +1048,14 @@ static void jbm_set_default_theme(jbm_theme_t *theme) {
     theme->button_spacing = 12;
     theme->button_radius = 7;
     theme->button_border_width = 1;
+    theme->button_alpha = 255;
     theme->text_size = 19;
+    theme->text_align = 0;
+    theme->layout_margin = 7;
+    theme->show_title = 1;
+    theme->show_description = 1;
+    theme->show_icons = 1;
+    theme->icon_scale = 100;
 }
 
 /* Splits "key = value" out of a line; returns 0 when a key was found. */
@@ -995,13 +1076,27 @@ static void jbm_parse_config_line(const char *line, jbm_config_t *cfg) {
     char key[128], val[160];
     if (jbm_split_kv(line, key, sizeof(key), val, sizeof(val)) != 0) return;
 
-    if (strcmp(key, "background") == 0) jbm_strcpy_(cfg->background_path, val, sizeof(cfg->background_path));
+    if (strcmp(key, "config_version") == 0) cfg->config_version = jbm_parse_int(val, cfg->config_version);
+    else if (strcmp(key, "background") == 0) jbm_strcpy_(cfg->background_path, val, sizeof(cfg->background_path));
+    else if (strcmp(key, "title") == 0) jbm_strcpy_(cfg->title, val, sizeof(cfg->title));
+    else if (strcmp(key, "subtitle") == 0) jbm_strcpy_(cfg->subtitle, val, sizeof(cfg->subtitle));
     else if (strcmp(key, "theme") == 0) jbm_strcpy_(cfg->theme_name, val, sizeof(cfg->theme_name));
-    else if (strcmp(key, "button_style") == 0) cfg->button_style = jbm_parse_int(val, cfg->button_style);
+    else if (strcmp(key, "button_style") == 0) { cfg->button_style = jbm_parse_int(val, cfg->button_style); cfg->mask |= JBM_K_BTN_STYLE; }
+    else if (strcmp(key, "text_align") == 0) { cfg->text_align = jbm_parse_int(val, cfg->text_align); cfg->mask |= JBM_K_TEXT_ALIGN; }
+    else if (strcmp(key, "layout_margin") == 0) { cfg->layout_margin = jbm_parse_int(val, cfg->layout_margin); cfg->mask |= JBM_K_LAYOUT_MARGIN; }
+    else if (strcmp(key, "button_alpha") == 0) { cfg->button_alpha = jbm_parse_int(val, cfg->button_alpha); cfg->mask |= JBM_K_BTN_ALPHA; }
+    else if (strcmp(key, "button_border_width") == 0) { cfg->button_border_width = jbm_parse_int(val, cfg->button_border_width); cfg->mask |= JBM_K_BTN_BORDER; }
+    else if (strcmp(key, "icon_scale") == 0) { cfg->icon_scale = jbm_parse_int(val, cfg->icon_scale); cfg->mask |= JBM_K_ICON_SCALE; }
+    else if (strcmp(key, "show_title") == 0) { cfg->show_title = jbm_parse_bool(val); cfg->mask |= JBM_K_SHOW_TITLE; }
+    else if (strcmp(key, "show_description") == 0) { cfg->show_description = jbm_parse_bool(val); cfg->mask |= JBM_K_SHOW_DESC; }
+    else if (strcmp(key, "show_icons") == 0) { cfg->show_icons = jbm_parse_bool(val); cfg->mask |= JBM_K_SHOW_ICONS; }
     else if (strcmp(key, "color_bg") == 0) { u32 c = jbm_parse_color(val); if (c) { cfg->color_bg = (u32)c; cfg->mask |= JBM_K_COLOR_BG; } }
     else if (strcmp(key, "color_fg") == 0) { u32 c = jbm_parse_color(val); if (c) { cfg->color_fg = (u32)c; cfg->mask |= JBM_K_COLOR_FG; } }
     else if (strcmp(key, "color_border") == 0) { u32 c = jbm_parse_color(val); if (c) { cfg->color_border = (u32)c; cfg->mask |= JBM_K_COLOR_BORDER; } }
     else if (strcmp(key, "color_highlight") == 0) { u32 c = jbm_parse_color(val); if (c) { cfg->color_highlight = (u32)c; cfg->mask |= JBM_K_COLOR_HL; } }
+    else if (strcmp(key, "color_selected_bg") == 0) { u32 c = jbm_parse_color(val); if (c) { cfg->color_selected_bg = (u32)c; cfg->mask |= JBM_K_COLOR_SEL_BG; } }
+    else if (strcmp(key, "color_pressed_bg") == 0) { u32 c = jbm_parse_color(val); if (c) { cfg->color_pressed_bg = (u32)c; cfg->mask |= JBM_K_COLOR_PRESSED; } }
+    else if (strcmp(key, "color_disabled_text") == 0) { u32 c = jbm_parse_color(val); if (c) { cfg->color_disabled_text = (u32)c; cfg->mask |= JBM_K_COLOR_DISABLED; } }
     else if (strcmp(key, "color_text") == 0) { u32 c = jbm_parse_color(val); if (c) { cfg->color_text = (u32)c; cfg->mask |= JBM_K_COLOR_TEXT; } }
     else if (strcmp(key, "color_text_sel") == 0) { u32 c = jbm_parse_color(val); if (c) { cfg->color_text_sel = (u32)c; cfg->mask |= JBM_K_COLOR_TEXTSEL; } }
     else if (strcmp(key, "color_accent") == 0) { u32 c = jbm_parse_color(val); if (c) { cfg->color_accent = (u32)c; cfg->mask |= JBM_K_COLOR_ACCENT; } }
@@ -1067,11 +1162,18 @@ static void jbm_parse_theme_line(const char *line, jbm_theme_t *theme) {
     char key[128], val[160];
     if (jbm_split_kv(line, key, sizeof(key), val, sizeof(val)) != 0) return;
 
-    if (strcmp(key, "button_style") == 0) theme->button_style = jbm_parse_int(val, theme->button_style);
+    if (strcmp(key, "extends") == 0) jbm_strcpy_(theme->extends, val, sizeof(theme->extends));
+    else if (strcmp(key, "button_style") == 0) theme->button_style = jbm_parse_int(val, theme->button_style);
     else if (strcmp(key, "color_bg") == 0) { u32 c = jbm_parse_color(val); if (c) theme->color_bg = (u32)c; }
     else if (strcmp(key, "color_fg") == 0) { u32 c = jbm_parse_color(val); if (c) theme->color_fg = (u32)c; }
     else if (strcmp(key, "color_border") == 0) { u32 c = jbm_parse_color(val); if (c) theme->color_border = (u32)c; }
-    else if (strcmp(key, "color_highlight") == 0) { u32 c = jbm_parse_color(val); if (c) theme->color_highlight = (u32)c; }
+    else if (strcmp(key, "color_highlight") == 0) {
+        u32 c = jbm_parse_color(val);
+        if (c) { theme->color_highlight = (u32)c; theme->color_selected_bg = (u32)c; }
+    }
+    else if (strcmp(key, "color_selected_bg") == 0) { u32 c = jbm_parse_color(val); if (c) theme->color_selected_bg = (u32)c; }
+    else if (strcmp(key, "color_pressed_bg") == 0) { u32 c = jbm_parse_color(val); if (c) theme->color_pressed_bg = (u32)c; }
+    else if (strcmp(key, "color_disabled_text") == 0) { u32 c = jbm_parse_color(val); if (c) theme->color_disabled_text = (u32)c; }
     else if (strcmp(key, "color_text") == 0) { u32 c = jbm_parse_color(val); if (c) theme->color_text = (u32)c; }
     else if (strcmp(key, "color_text_sel") == 0) { u32 c = jbm_parse_color(val); if (c) theme->color_text_sel = (u32)c; }
     else if (strcmp(key, "color_accent") == 0) { u32 c = jbm_parse_color(val); if (c) theme->color_accent = (u32)c; }
@@ -1080,11 +1182,25 @@ static void jbm_parse_theme_line(const char *line, jbm_theme_t *theme) {
     else if (strcmp(key, "button_spacing") == 0) theme->button_spacing = jbm_parse_int(val, theme->button_spacing);
     else if (strcmp(key, "button_radius") == 0) theme->button_radius = jbm_parse_int(val, theme->button_radius);
     else if (strcmp(key, "button_border_width") == 0) theme->button_border_width = jbm_parse_int(val, theme->button_border_width);
+    else if (strcmp(key, "button_alpha") == 0) theme->button_alpha = jbm_parse_int(val, theme->button_alpha);
     else if (strcmp(key, "text_size") == 0) theme->text_size = jbm_parse_int(val, theme->text_size);
+    else if (strcmp(key, "text_align") == 0) theme->text_align = jbm_parse_int(val, theme->text_align);
+    else if (strcmp(key, "layout_margin") == 0) theme->layout_margin = jbm_parse_int(val, theme->layout_margin);
+    else if (strcmp(key, "show_title") == 0) theme->show_title = jbm_parse_bool(val);
+    else if (strcmp(key, "show_description") == 0) theme->show_description = jbm_parse_bool(val);
+    else if (strcmp(key, "show_icons") == 0) theme->show_icons = jbm_parse_bool(val);
+    else if (strcmp(key, "icon_scale") == 0) theme->icon_scale = jbm_parse_int(val, theme->icon_scale);
 }
 
-/* Merges <root>/themes/<name>.ini over an already-initialised theme. */
+static int jbm_load_theme_file_depth(const char *name, jbm_theme_t *theme, int depth);
+
+/* Merges <root>/themes/<name>.ini over an already-initialised theme,
+ * resolving `extends = <theme>` first (up to two levels). */
 static int jbm_load_theme_file(const char *name, jbm_theme_t *theme) {
+    return jbm_load_theme_file_depth(name, theme, 0);
+}
+
+static int jbm_load_theme_file_depth(const char *name, jbm_theme_t *theme, int depth) {
     char path[192];
     jbm_sn(path, "%s/themes/%s.ini", JBM_ROOT, name);
     char buf[4096];
@@ -1092,10 +1208,68 @@ static int jbm_load_theme_file(const char *name, jbm_theme_t *theme) {
         jbm_log("jbm: theme %s not found at %s, keeping base theme", name, path);
         return -1;
     }
+    /* Resolve inheritance by peeking at the buffer before applying it. */
+    if (depth < 2) {
+        char parent[JBM_MAX_THEME_NAME];
+        parent[0] = 0;
+        char scan[4096];
+        jbm_strcpy_(scan, buf, sizeof(scan));
+        char *line = scan;
+        while (*line) {
+            char *nl = strchr(line, '\n');
+            if (nl) *nl = 0;
+            jbm_trim(line);
+            char key[64], val[128];
+            if (line[0] != '#' && line[0] != ';' && line[0] != '[' &&
+                jbm_split_kv(line, key, sizeof(key), val, sizeof(val)) == 0 &&
+                strcmp(key, "extends") == 0) {
+                jbm_strcpy_(parent, val, sizeof(parent));
+                break;
+            }
+            if (nl) line = nl + 1;
+            else break;
+        }
+        if (parent[0] && strcmp(parent, name) != 0)
+            jbm_load_theme_file_depth(parent, theme, depth + 1);
+    }
     jbm_foreach_kv(buf, jbm_theme_kv_cb, theme);
     jbm_strcpy_(theme->name, name, sizeof(theme->name));
     jbm_log("jbm: loaded theme %s from %s", name, path);
     return 0;
+}
+
+/* Clamps values that reach the renderer so a malformed file can never make the
+ * menu draw out of bounds or divide by zero. */
+static int jbm_clampi(int v, int lo, int hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+static void jbm_validate_config(void) {
+    JBM_CFG.button_width = jbm_clampi(JBM_CFG.button_width, 80, 4000);
+    JBM_CFG.button_height = jbm_clampi(JBM_CFG.button_height, 40, 1200);
+    JBM_CFG.button_spacing = jbm_clampi(JBM_CFG.button_spacing, 0, 400);
+    JBM_CFG.button_radius = jbm_clampi(JBM_CFG.button_radius, 0, 400);
+    JBM_CFG.button_border_width = jbm_clampi(JBM_CFG.button_border_width, 0, 24);
+    JBM_CFG.button_alpha = jbm_clampi(JBM_CFG.button_alpha, 0, 255);
+    JBM_CFG.text_size = jbm_clampi(JBM_CFG.text_size, 8, 96);
+    JBM_CFG.text_align = jbm_clampi(JBM_CFG.text_align, 0, 2);
+    JBM_CFG.layout_margin = jbm_clampi(JBM_CFG.layout_margin, 0, 35);
+    JBM_CFG.icon_scale = jbm_clampi(JBM_CFG.icon_scale, 50, 300);
+    JBM_CFG.button_style = jbm_clampi(JBM_CFG.button_style, 0, 3);
+    JBM_CFG.menu_timeout_sec = jbm_clampi(JBM_CFG.menu_timeout_sec, 0, 3600);
+    JBM_CFG.log_level = jbm_clampi(JBM_CFG.log_level, 0, 7);
+    for (int i = 0; i < JBM_NUM_ENTRIES; i++) {
+        jbm_entry_t *e = &JBM_ENTRIES[i];
+        if (e->button_style < -1) e->button_style = -1;
+        if (e->button_style > 3) e->button_style = 3;
+        if (e->button_width > 0) e->button_width = jbm_clampi(e->button_width, 80, 4000);
+        if (e->button_height > 0) e->button_height = jbm_clampi(e->button_height, 40, 1200);
+        if (e->button_radius >= 0) e->button_radius = jbm_clampi(e->button_radius, 0, 400);
+        if (e->button_border_width >= 0) e->button_border_width = jbm_clampi(e->button_border_width, 0, 24);
+        if (e->icon_scale > 0) e->icon_scale = jbm_clampi(e->icon_scale, 50, 300);
+        if (e->text_align < -1) e->text_align = -1;
+        if (e->text_align > 2) e->text_align = 2;
+    }
 }
 
 /* Theme file first, then only the config colours/metrics that were set. */
@@ -1106,6 +1280,9 @@ static void jbm_build_effects(void) {
     if (JBM_CFG.mask & JBM_K_COLOR_FG) JBM_FX.color_fg = JBM_CFG.color_fg;
     if (JBM_CFG.mask & JBM_K_COLOR_BORDER) JBM_FX.color_border = JBM_CFG.color_border;
     if (JBM_CFG.mask & JBM_K_COLOR_HL) JBM_FX.color_highlight = JBM_CFG.color_highlight;
+    if (JBM_CFG.mask & JBM_K_COLOR_SEL_BG) JBM_FX.color_selected_bg = JBM_CFG.color_selected_bg;
+    if (JBM_CFG.mask & JBM_K_COLOR_PRESSED) JBM_FX.color_pressed_bg = JBM_CFG.color_pressed_bg;
+    if (JBM_CFG.mask & JBM_K_COLOR_DISABLED) JBM_FX.color_disabled_text = JBM_CFG.color_disabled_text;
     if (JBM_CFG.mask & JBM_K_COLOR_TEXT) JBM_FX.color_text = JBM_CFG.color_text;
     if (JBM_CFG.mask & JBM_K_COLOR_TEXTSEL) JBM_FX.color_text_sel = JBM_CFG.color_text_sel;
     if (JBM_CFG.mask & JBM_K_COLOR_ACCENT) JBM_FX.color_accent = JBM_CFG.color_accent;
@@ -1113,9 +1290,23 @@ static void jbm_build_effects(void) {
     if (JBM_CFG.mask & JBM_K_BTN_H) JBM_FX.button_height = JBM_CFG.button_height;
     if (JBM_CFG.mask & JBM_K_BTN_GAP) JBM_FX.button_spacing = JBM_CFG.button_spacing;
     if (JBM_CFG.mask & JBM_K_BTN_R) JBM_FX.button_radius = JBM_CFG.button_radius;
+    if (JBM_CFG.mask & JBM_K_BTN_BORDER) JBM_FX.button_border_width = JBM_CFG.button_border_width;
+    if (JBM_CFG.mask & JBM_K_BTN_ALPHA) JBM_FX.button_alpha = JBM_CFG.button_alpha;
     if (JBM_CFG.mask & JBM_K_TEXT_SIZE) JBM_FX.text_size = JBM_CFG.text_size;
-    jbm_log("jbm: effects bg=%08x accent=%08x hl=%08x text=%08x", JBM_FX.color_bg,
-            JBM_FX.color_accent, JBM_FX.color_highlight, JBM_FX.color_text);
+    if (JBM_CFG.mask & JBM_K_LAYOUT_MARGIN) JBM_FX.layout_margin = JBM_CFG.layout_margin;
+    if (JBM_CFG.mask & JBM_K_ICON_SCALE) JBM_FX.icon_scale = JBM_CFG.icon_scale;
+    if (JBM_CFG.mask & JBM_K_BTN_STYLE) JBM_FX.button_style = JBM_CFG.button_style;
+    if (JBM_CFG.mask & JBM_K_SHOW_TITLE) JBM_FX.show_title = JBM_CFG.show_title;
+    if (JBM_CFG.mask & JBM_K_SHOW_DESC) JBM_FX.show_description = JBM_CFG.show_description;
+    if (JBM_CFG.mask & JBM_K_SHOW_ICONS) JBM_FX.show_icons = JBM_CFG.show_icons;
+    if (JBM_CFG.mask & JBM_K_TEXT_ALIGN) JBM_FX.text_align = JBM_CFG.text_align;
+    /* Legacy configs only know color_highlight; keep its selected fill. */
+    if ((JBM_CFG.mask & JBM_K_COLOR_HL) && !(JBM_CFG.mask & JBM_K_COLOR_SEL_BG))
+        JBM_FX.color_selected_bg = JBM_FX.color_highlight;
+    jbm_validate_config();
+    jbm_log("jbm: effects bg=%08x accent=%08x hl=%08x sel=%08x text=%08x style=%d", JBM_FX.color_bg,
+            JBM_FX.color_accent, JBM_FX.color_highlight, JBM_FX.color_selected_bg,
+            JBM_FX.color_text, JBM_FX.button_style);
 }
 
 static jbm_entry_type_t jbm_parse_entry_type(const char *s) {
@@ -1136,6 +1327,8 @@ static void jbm_parse_entry_line(const char *line, jbm_entry_t *entry) {
     if (jbm_split_kv(line, key, sizeof(key), val, sizeof(val)) != 0) return;
 
     if (strcmp(key, "name") == 0) jbm_strcpy_(entry->name, val, sizeof(entry->name));
+    else if (strcmp(key, "description") == 0) jbm_strcpy_(entry->description, val, sizeof(entry->description));
+    else if (strcmp(key, "icon") == 0) jbm_strcpy_(entry->icon, val, sizeof(entry->icon));
     else if (strcmp(key, "type") == 0) entry->type = jbm_parse_entry_type(val);
     else if (strcmp(key, "path") == 0) jbm_strcpy_(entry->path, val, sizeof(entry->path));
     else if (strcmp(key, "args") == 0) jbm_strcpy_(entry->args, val, sizeof(entry->args));
@@ -1143,6 +1336,33 @@ static void jbm_parse_entry_line(const char *line, jbm_entry_t *entry) {
     else if (strcmp(key, "order") == 0) entry->order = jbm_parse_int(val, entry->order);
     else if (strcmp(key, "default") == 0) entry->is_default = jbm_parse_bool(val);
     else if (strcmp(key, "behavior_after") == 0) entry->behavior_after = jbm_parse_int(val, entry->behavior_after);
+    else if (strcmp(key, "button_style") == 0) entry->button_style = jbm_parse_int(val, entry->button_style);
+    else if (strcmp(key, "button_width") == 0) entry->button_width = jbm_parse_int(val, entry->button_width);
+    else if (strcmp(key, "button_height") == 0) entry->button_height = jbm_parse_int(val, entry->button_height);
+    else if (strcmp(key, "button_radius") == 0) entry->button_radius = jbm_parse_int(val, entry->button_radius);
+    else if (strcmp(key, "button_border_width") == 0) entry->button_border_width = jbm_parse_int(val, entry->button_border_width);
+    else if (strcmp(key, "text_align") == 0) entry->text_align = jbm_parse_int(val, entry->text_align);
+    else if (strcmp(key, "icon_scale") == 0) entry->icon_scale = jbm_parse_int(val, entry->icon_scale);
+    else if (strcmp(key, "show_icon") == 0) entry->show_icon = jbm_parse_bool(val);
+    else if (strcmp(key, "color_bg") == 0) { u32 c = jbm_parse_color(val); if (c) entry->color_bg = c; }
+    else if (strcmp(key, "color_border") == 0) { u32 c = jbm_parse_color(val); if (c) entry->color_border = c; }
+    else if (strcmp(key, "color_text") == 0) { u32 c = jbm_parse_color(val); if (c) entry->color_text = c; }
+    else if (strcmp(key, "color_text_sel") == 0) { u32 c = jbm_parse_color(val); if (c) entry->color_text_sel = c; }
+}
+
+static void jbm_entry_defaults(jbm_entry_t *e) {
+    e->button_style = -1;
+    e->button_width = 0;
+    e->button_height = 0;
+    e->button_radius = -1;
+    e->button_border_width = -1;
+    e->text_align = -1;
+    e->icon_scale = 0;
+    e->show_icon = -1;
+    e->color_bg = 0;
+    e->color_border = 0;
+    e->color_text = 0;
+    e->color_text_sel = 0;
 }
 
 static jbm_entry_t jbm_entry_tmp;
@@ -1168,6 +1388,7 @@ static void jbm_load_entries(void) {
                 JBM_ENTRIES[JBM_NUM_ENTRIES++] = *cur;
             cur = &jbm_entry_tmp;
             memset(cur, 0, sizeof(*cur));
+            jbm_entry_defaults(cur);
             cur->enabled = 1;
             cur->order = JBM_NUM_ENTRIES;
             char *end = strchr(line + 1, ']');
@@ -1210,6 +1431,19 @@ static const struct jbm_builtin_entry JBM_BUILTINS[] = {
 };
 #define JBM_NUM_BUILTINS ((int)(sizeof(JBM_BUILTINS) / sizeof(JBM_BUILTINS[0])))
 
+static const char *jbm_entry_type_name(jbm_entry_type_t t);
+static const char *jbm_builtin_description(int i) {
+    static const char *const d[] = {
+        "Start Android", "Reboot to recovery", "Reboot to bootloader",
+        "Reboot to download mode", "Restart the device", "Power the device off",
+    };
+    return (i >= 0 && i < 6) ? d[i] : "";
+}
+static const char *jbm_builtin_icon(int i) {
+    static const char *const n[] = {"system", "recovery", "fastboot", "download", "reboot", "power"};
+    return (i >= 0 && i < 6) ? n[i] : "";
+}
+
 static const char *jbm_entry_type_name(jbm_entry_type_t t) {
     switch (t) {
         case JBM_ENTRY_TYPE_RECOVERY: return "recovery";
@@ -1228,6 +1462,7 @@ static void jbm_ensure_default_entries(void) {
     for (int i = 0; i < JBM_NUM_BUILTINS; i++) {
         jbm_entry_t *e = &JBM_ENTRIES[JBM_NUM_ENTRIES++];
         memset(e, 0, sizeof(*e));
+        jbm_entry_defaults(e);
         jbm_strcpy_(e->id, JBM_BUILTINS[i].id, sizeof(e->id));
         jbm_strcpy_(e->name, JBM_BUILTINS[i].name, sizeof(e->name));
         e->type = JBM_BUILTINS[i].type;
@@ -1355,6 +1590,13 @@ static void jbm_write_default_config(void) {
                 "# defaults back. Full reference: README.md (Configuration).\n\n");
     o = jbm_app(b, sizeof(b), o, "# Look and feel\n");
     o = jbm_app_str(b, sizeof(b), o, "theme", d.theme_name);
+    o = jbm_app_int(b, sizeof(b), o, "config_version", JBM_CONFIG_VERSION);
+    o = jbm_app_str(b, sizeof(b), o, "title", d.title);
+    o = jbm_app_str(b, sizeof(b), o, "subtitle", d.subtitle);
+    o = jbm_app_int(b, sizeof(b), o, "show_title", d.show_title);
+    o = jbm_app_int(b, sizeof(b), o, "show_description", d.show_description);
+    o = jbm_app_int(b, sizeof(b), o, "show_icons", d.show_icons);
+    o = jbm_app_int(b, sizeof(b), o, "icon_scale", d.icon_scale);
     o = jbm_app(b, sizeof(b), o, "# background = ");
     o = jbm_app(b, sizeof(b), o, JBM_ROOT);
     o = jbm_app(b, sizeof(b), o, "/background.bmp\n");
@@ -1362,10 +1604,17 @@ static void jbm_write_default_config(void) {
                 "# Colours/metrics live in themes/default.ini. Uncomment a line\n"
                 "# here to override the theme just for this device.\n");
     o = jbm_app_int(b, sizeof(b), o, "# button_style", d.button_style);
+    o = jbm_app_int(b, sizeof(b), o, "# button_alpha", d.button_alpha);
+    o = jbm_app_int(b, sizeof(b), o, "# button_border_width", d.button_border_width);
+    o = jbm_app_int(b, sizeof(b), o, "# text_align", d.text_align);
+    o = jbm_app_int(b, sizeof(b), o, "# layout_margin", d.layout_margin);
     o = jbm_app_color(b, sizeof(b), o, "# color_bg", d.color_bg);
     o = jbm_app_color(b, sizeof(b), o, "# color_fg", d.color_fg);
     o = jbm_app_color(b, sizeof(b), o, "# color_border", d.color_border);
     o = jbm_app_color(b, sizeof(b), o, "# color_highlight", d.color_highlight);
+    o = jbm_app_color(b, sizeof(b), o, "# color_selected_bg", d.color_selected_bg);
+    o = jbm_app_color(b, sizeof(b), o, "# color_pressed_bg", d.color_pressed_bg);
+    o = jbm_app_color(b, sizeof(b), o, "# color_disabled_text", d.color_disabled_text);
     o = jbm_app_color(b, sizeof(b), o, "# color_text", d.color_text);
     o = jbm_app_color(b, sizeof(b), o, "# color_text_sel", d.color_text_sel);
     o = jbm_app_color(b, sizeof(b), o, "# color_accent", d.color_accent);
@@ -1404,8 +1653,10 @@ static void jbm_write_default_entries_file(void) {
                 "# defaults back. type: system|recovery|fastboot|download|\n"
                 "# reboot|poweroff|script|binary\n\n");
     for (int i = 0; i < JBM_NUM_BUILTINS; i++) {
-        jbm_sn(t, "[%s]\nname = %s\ntype = %s\nenabled = 1\norder = %d\ndefault = %d\n",
-               JBM_BUILTINS[i].id, JBM_BUILTINS[i].name, jbm_entry_type_name(JBM_BUILTINS[i].type),
+        jbm_sn(t, "[%s]\nname = %s\ndescription = %s\nicon = %s\ntype = %s\n"
+                  "enabled = 1\norder = %d\ndefault = %d\n",
+               JBM_BUILTINS[i].id, JBM_BUILTINS[i].name, jbm_builtin_description(i),
+               jbm_builtin_icon(i), jbm_entry_type_name(JBM_BUILTINS[i].type),
                i, i == 0 ? 1 : 0);
         o = jbm_app(b, sizeof(b), o, t);
         if (i + 1 < JBM_NUM_BUILTINS) o = jbm_app(b, sizeof(b), o, "\n");
@@ -1415,32 +1666,102 @@ static void jbm_write_default_entries_file(void) {
     jbm_write_new_text(path, b);
 }
 
+static void jbm_theme_body(char *b, u32 cap, const jbm_theme_t *d, const char *extends) {
+    u32 o = 0;
+    o = jbm_app(b, cap, o, "# JupiterBoot theme -- generated on first boot.\n");
+    if (extends && extends[0]) {
+        char t[96];
+        jbm_sn(t, "extends = %s\n", extends);
+        o = jbm_app(b, cap, o, t);
+    }
+    o = jbm_app_int(b, cap, o, "button_style", d->button_style);
+    o = jbm_app_color(b, cap, o, "color_bg", d->color_bg);
+    o = jbm_app_color(b, cap, o, "color_fg", d->color_fg);
+    o = jbm_app_color(b, cap, o, "color_border", d->color_border);
+    o = jbm_app_color(b, cap, o, "color_highlight", d->color_highlight);
+    o = jbm_app_color(b, cap, o, "color_selected_bg", d->color_selected_bg);
+    o = jbm_app_color(b, cap, o, "color_pressed_bg", d->color_pressed_bg);
+    o = jbm_app_color(b, cap, o, "color_disabled_text", d->color_disabled_text);
+    o = jbm_app_color(b, cap, o, "color_text", d->color_text);
+    o = jbm_app_color(b, cap, o, "color_text_sel", d->color_text_sel);
+    o = jbm_app_color(b, cap, o, "color_accent", d->color_accent);
+    o = jbm_app_int(b, cap, o, "button_width", d->button_width);
+    o = jbm_app_int(b, cap, o, "button_height", d->button_height);
+    o = jbm_app_int(b, cap, o, "button_spacing", d->button_spacing);
+    o = jbm_app_int(b, cap, o, "button_radius", d->button_radius);
+    o = jbm_app_int(b, cap, o, "button_border_width", d->button_border_width);
+    o = jbm_app_int(b, cap, o, "button_alpha", d->button_alpha);
+    o = jbm_app_int(b, cap, o, "text_size", d->text_size);
+    o = jbm_app_int(b, cap, o, "text_align", d->text_align);
+    o = jbm_app_int(b, cap, o, "layout_margin", d->layout_margin);
+    o = jbm_app_int(b, cap, o, "show_title", d->show_title);
+    o = jbm_app_int(b, cap, o, "show_description", d->show_description);
+    o = jbm_app_int(b, cap, o, "show_icons", d->show_icons);
+    o = jbm_app_int(b, cap, o, "icon_scale", d->icon_scale);
+    (void)o;
+}
+
+static void jbm_write_theme_named(const char *name, const jbm_theme_t *theme, const char *extends) {
+    static char b[2048];
+    char path[192];
+    jbm_theme_body(b, sizeof(b), theme, extends);
+    jbm_sn(path, "%s/themes/%s.ini", JBM_ROOT, name);
+    jbm_write_new_text(path, b);
+}
+
 static void jbm_write_default_theme_file(void) {
     jbm_theme_t d;
     jbm_set_default_theme(&d);
-    static char b[1024];
-    char path[192];
-    u32 o = 0;
-    o = jbm_app(b, sizeof(b), o,
-                "# JupiterBoot theme 'default' -- generated on first boot.\n"
-                "# A config.ini colour overrides the matching value here.\n\n");
-    o = jbm_app_int(b, sizeof(b), o, "button_style", d.button_style);
-    o = jbm_app_color(b, sizeof(b), o, "color_bg", d.color_bg);
-    o = jbm_app_color(b, sizeof(b), o, "color_fg", d.color_fg);
-    o = jbm_app_color(b, sizeof(b), o, "color_border", d.color_border);
-    o = jbm_app_color(b, sizeof(b), o, "color_highlight", d.color_highlight);
-    o = jbm_app_color(b, sizeof(b), o, "color_text", d.color_text);
-    o = jbm_app_color(b, sizeof(b), o, "color_text_sel", d.color_text_sel);
-    o = jbm_app_color(b, sizeof(b), o, "color_accent", d.color_accent);
-    o = jbm_app_int(b, sizeof(b), o, "button_width", d.button_width);
-    o = jbm_app_int(b, sizeof(b), o, "button_height", d.button_height);
-    o = jbm_app_int(b, sizeof(b), o, "button_spacing", d.button_spacing);
-    o = jbm_app_int(b, sizeof(b), o, "button_radius", d.button_radius);
-    o = jbm_app_int(b, sizeof(b), o, "button_border_width", d.button_border_width);
-    o = jbm_app_int(b, sizeof(b), o, "text_size", d.text_size);
-    (void)o;
-    jbm_sn(path, "%s/themes/default.ini", JBM_ROOT);
-    jbm_write_new_text(path, b);
+    jbm_write_theme_named("default", &d, NULL);
+
+    /* Jupiter: the original warm amber-on-space look. */
+    d.button_style = 0;
+    d.color_bg = 0xFF020202;
+    d.color_border = 0xFFD88A4E;
+    d.color_highlight = 0xFFB86837;
+    d.color_selected_bg = 0xFFB86837;
+    d.color_pressed_bg = 0xFFD88A4E;
+    d.color_text = 0xFF858585;
+    d.color_text_sel = 0xFFFFFFFF;
+    d.color_accent = 0xFFC87335;
+    d.button_radius = 7;
+    d.button_alpha = 255;
+    jbm_write_theme_named("jupiter", &d, NULL);
+
+    /* AMOLED: true black, thin outlined buttons, no fills. */
+    d.button_style = 1;
+    d.color_bg = 0xFF000000;
+    d.color_fg = 0xFF000000;
+    d.color_border = 0xFF3A3A3A;
+    d.color_highlight = 0xFF101010;
+    d.color_selected_bg = 0xFF1C1C1C;
+    d.color_pressed_bg = 0xFF2A2A2A;
+    d.color_text = 0xFF9A9A9A;
+    d.color_text_sel = 0xFFFFFFFF;
+    d.color_accent = 0xFFE6E6E6;
+    d.button_alpha = 0;
+    d.button_radius = 2;
+    d.button_border_width = 1;
+    d.text_size = 18;
+    jbm_write_theme_named("amoled", &d, NULL);
+
+    /* Minimal: flat, borderless, tight spacing. */
+    d.button_style = 2;
+    d.color_bg = 0xFF111318;
+    d.color_border = 0xFF111318;
+    d.color_highlight = 0xFF1E222A;
+    d.color_selected_bg = 0xFF1E222A;
+    d.color_pressed_bg = 0xFF2A2F39;
+    d.color_text = 0xFFA6ADBA;
+    d.color_text_sel = 0xFFF5F7FA;
+    d.color_accent = 0xFF7DA2C9;
+    d.button_alpha = 0;
+    d.button_radius = 0;
+    d.button_border_width = 0;
+    d.button_spacing = 4;
+    d.text_size = 17;
+    jbm_write_theme_named("minimal", &d, NULL);
+    jbm_log("jbm: ensured themes default/jupiter/amoled/minimal under %s/themes", JBM_ROOT);
 }
 
 static void jbm_le16(u8 *p, u16 v) {
@@ -3380,25 +3701,148 @@ static void draw_space(int which) {
 /* menu geometry: .interface left:7vw top:9vh width:370px, .menu gap   */
 /* ------------------------------------------------------------------ */
 
+struct btnfx {
+    int style;
+    int width;
+    int height;
+    int radius;
+    int border;
+    int text_align;
+    int icon_scale;
+    int show_icon;
+    u32 bg;
+    u32 border_color;
+    u32 text;
+    u32 text_sel;
+};
+
+/* Merges the per-entry overrides over the theme. Any unset value (-1/0)
+ * inherits from JBM_FX, which is what the Android preview mirrors. */
+static void btn_effective(int i, struct btnfx *o) {
+    const jbm_entry_t *e = &JBM_ENTRIES[i];
+    o->style = e->button_style >= 0 ? e->button_style : JBM_FX.button_style;
+    o->width = e->button_width > 0 ? e->button_width : JBM_FX.button_width;
+    o->height = e->button_height > 0 ? e->button_height : JBM_FX.button_height;
+    o->radius = e->button_radius >= 0 ? e->button_radius : JBM_FX.button_radius;
+    o->border = e->button_border_width >= 0 ? e->button_border_width : JBM_FX.button_border_width;
+    o->text_align = e->text_align >= 0 ? e->text_align : JBM_FX.text_align;
+    o->icon_scale = e->icon_scale > 0 ? e->icon_scale : JBM_FX.icon_scale;
+    o->show_icon = e->show_icon >= 0 ? e->show_icon : JBM_FX.show_icons;
+    o->bg = e->color_bg ? e->color_bg : JBM_FX.color_selected_bg;
+    o->border_color = e->color_border ? e->color_border : JBM_FX.color_border;
+    o->text = e->color_text ? e->color_text : JBM_FX.color_text;
+    o->text_sel = e->color_text_sel ? e->color_text_sel : JBM_FX.color_text_sel;
+}
+
+/* Picks a procedural glyph from the entry's `icon` string, falling back to
+ * its type. There are no external icon files: every glyph is drawn with the
+ * same primitives as the rest of the UI, so nothing can fail to load. */
+static int icon_kind(const jbm_entry_t *e) {
+    const char *n = e->icon[0] ? e->icon : jbm_builtin_icon((int)e->type);
+    if (jbm_str_has(n, "recovery")) return 1;
+    if (jbm_str_has(n, "fastboot")) return 2;
+    if (jbm_str_has(n, "download")) return 3;
+    if (jbm_str_has(n, "reboot") || jbm_str_has(n, "restart")) return 4;
+    if (jbm_str_has(n, "power") || jbm_str_has(n, "off")) return 5;
+    if (jbm_str_has(n, "script") || jbm_str_has(n, "binary")) return 6;
+    return 0;
+}
+
+static void draw_icon(int kind, int cx, int cy, int r, u32 c) {
+    if (r < 2) return;
+    switch (kind) {
+        case 1: /* recovery: plus inside a ring */
+            ring(cx, cy, r, r / 5 < 1 ? 1 : r / 5, c);
+            fill_rect(cx - r / 2, cy - 1, r, 3, c);
+            fill_rect(cx - 1, cy - r / 2, 3, r, c);
+            break;
+        case 2: /* fastboot: arrow right */
+            fill_rect(cx - r, cy - r / 6, r + r / 2, r / 3 + 1, c);
+            for (int i = 0; i < r / 2; i++)
+                fill_rect(cx + r / 2 + i, cy - r / 2 + i, 1, r - i * 2, c);
+            break;
+        case 3: /* download: arrow down into a tray */
+            fill_rect(cx - 2, cy - r, 4, r + r / 4, c);
+            for (int i = 0; i < r / 2; i++)
+                fill_rect(cx - r / 2 + i, cy + r / 4 - i, r - i * 2, 2, c);
+            fill_rect(cx - r, cy + r - 2, r * 2, 2, c);
+            break;
+        case 4: /* reboot: circular arrow */
+            ring(cx, cy, r, r / 4 < 1 ? 1 : r / 4, c);
+            fill_rect(cx + r / 2, cy - r, r / 2, r / 2, c);
+            break;
+        case 5: /* power: broken ring + stem */
+            ring(cx, cy, r, r / 4 < 1 ? 1 : r / 4, c);
+            fill_rect(cx - 1, cy - r - 1, 3, r + 2, c);
+            break;
+        case 6: /* script: terminal window */
+            round_rect_border(cx - r, cy - r / 2, r * 2, r, 2, 1, c);
+            fill_rect(cx - r / 2, cy, r / 2, r / 2, c);
+            break;
+        default: /* system: planet with ring */
+            ring(cx, cy, r, r / 5 < 1 ? 1 : r / 5, c);
+            disc(cx, cy, r / 3 < 1 ? 1 : r / 3, c);
+            ellipse_ring(cx, cy, r + r / 3, r / 4 < 1 ? 1 : r / 4, -18, 2, c);
+            break;
+    }
+}
+
+static int btn_x(int i, int *w, int *h) {
+    (void)i;
+    float k = dk();
+    struct btnfx fx;
+    btn_effective(i, &fx);
+    int avail = (int)G.w - (int)((float)G.w * (float)JBM_FX.layout_margin / 100.0f) * 2;
+    *w = (int)((float)fx.width * k);
+    if (*w > avail) *w = avail;
+    if (*w < 80) *w = 80;
+    *h = (int)((float)fx.height * k);
+    if (*h < 30) *h = 30;
+    return (int)((float)G.w * (float)JBM_FX.layout_margin / 100.0f);
+}
+
+static int jbm_show_header(void) {
+    return JBM_FX.show_title && JBM_CFG.show_brand;
+}
+
+static int menu_top(void) {
+    float k = dk();
+    int top = (int)((float)G.h * 0.09f);
+    if (jbm_show_header()) top += (int)(38.0f * k) + (int)(5.0f * k);
+    top += (int)(45.0f * k); /* .device + margin-bottom */
+    return top;
+}
+
 static void btn_geom(int i, int *x, int *y, int *w, int *h) {
     float k = dk();
-    *x = (int)((float)G.w * 0.07f);
-    *w = (int)((float)JBM_FX.button_width * k);
-    *h = (int)((float)JBM_FX.button_height * k);
-    int top = (int)((float)G.h * 0.09f) + (int)(38.0f * k) + (int)(5.0f * k) +
-              (int)(45.0f * k); /* brand + empty .device + its margin-bottom */
-    *y = top + (i - U.scroll) * (*h + (int)((float)JBM_FX.button_spacing * k));
+    *x = btn_x(i, w, h);
+    int yy = menu_top();
+    int start = U.scroll > 0 ? U.scroll : 0;
+    if (i < start) i = start;
+    for (int j = start; j < i; j++) {
+        int iw, ih;
+        btn_x(j, &iw, &ih);
+        yy += ih + (int)((float)JBM_FX.button_spacing * k);
+    }
+    *y = yy;
 }
 
 /* Number of rows fully visible below the header, used to bound scrolling. */
 static int visible_rows(void) {
     float k = dk();
-    int top = (int)((float)G.h * 0.09f) + (int)(38.0f * k) + (int)(5.0f * k) +
-              (int)(45.0f * k);
-    int row = (int)((float)JBM_FX.button_height * k) + (int)((float)JBM_FX.button_spacing * k);
+    int y = menu_top();
     int foot = (int)(150.0f * k); /* footer + autoboot readout */
-    int avail = (int)G.h - top - foot;
-    int n = row > 0 ? avail / row : 0;
+    int avail = (int)G.h - y - foot;
+    int n = 0;
+    int used = 0;
+    for (int i = U.scroll; i < act_n(); i++) {
+        int w, h;
+        btn_x(i, &w, &h);
+        int need = h + (int)((float)JBM_FX.button_spacing * k);
+        if (used + need > avail && n > 0) break;
+        used += need;
+        n++;
+    }
     return n < 1 ? 1 : n;
 }
 
@@ -3433,20 +3877,26 @@ static void draw_ui(void) {
 
     draw_space(BG_MENU);
 
-    int ix = (int)((float)G.w * 0.07f);
+    int ix = (int)((float)G.w * (float)JBM_FX.layout_margin / 100.0f);
     int by = (int)((float)G.h * 0.09f);
     int br = (int)(19.0f * k); /* .planet-icon: 38px */
     int bcy = by + br;
 
-    ring(ix + br, bcy, br, (int)(2.0f * k) + 1, RGBA(0xBD7946FF));
-    ellipse_ring(ix + br, bcy, (int)(21.5f * k), (int)(6.0f * k), -18, (int)(2.0f * k),
-                 RGBA(0xBD7946FF));
-    float bpx = 28.0f * k;
-    int nx = ix + (int)(38.0f * k) + (int)(14.0f * k); /* gap:14px */
-    draw_text_ls(&FN32, nx, bcy, bpx, 0, RGBA(0xEEEEEEFF), "Jupiter", TA_L | VA_M);
-    draw_text_ls(&FN32, nx + measure(&FN32, "Jupiter", bpx, 0), bcy, bpx, 0,
-                 RGBA(0xC47B48FF), "Boot", TA_L | VA_M);
+    if (jbm_show_header()) {
+        ring(ix + br, bcy, br, (int)(2.0f * k) + 1, (JBM_FX.color_border & 0xFFFFFFu) | 0xFF000000u);
+        ellipse_ring(ix + br, bcy, (int)(21.5f * k), (int)(6.0f * k), -18, (int)(2.0f * k),
+                     (JBM_FX.color_border & 0xFFFFFFu) | 0xFF000000u);
+        float bpx = 28.0f * k;
+        int nx = ix + (int)(38.0f * k) + (int)(14.0f * k); /* gap:14px */
+        draw_text_ls(&FN32, nx, bcy, bpx, 0, RGBA(0xEEEEEEFF), JBM_CFG.title, TA_L | VA_M);
+        if (JBM_CFG.subtitle[0]) {
+            draw_text_ls(&FN32, nx + measure(&FN32, JBM_CFG.title, bpx, 0), bcy, bpx, 0,
+                         (JBM_FX.color_accent & 0xFFFFFFu) | 0xFF000000u, JBM_CFG.subtitle,
+                         TA_L | VA_M);
+        }
+    }
 
+    int pressed = T.holding ? hit_btn(T.sx, T.sy) : -1;
     for (int i = 0; i < act_n(); i++) {
         int x, y, w, h;
         btn_geom(i, &x, &y, &w, &h);
@@ -3455,22 +3905,96 @@ static void draw_ui(void) {
         int alpha = a < 0 ? 0 : (a < 260 ? (int)(a * 255 / 260) : 255);
         if (alpha < 6) continue;
         int sel = (i == U.sel);
-        int rr = (int)((float)JBM_FX.button_radius * k);
-        if (sel) {
-            u32 hl = JBM_FX.color_highlight;
-            grad_rect(x, y, w, h, rr, ((u32)(alpha * 56 / 255) << 24) | (hl & 0xFFFFFFu),
-                      ((u32)(alpha * 6 / 255) << 24) | (hl & 0xFFFFFFu));
-            round_rect_border(x, y, w, h, rr, JBM_FX.button_border_width,
-                              ((u32)(alpha * 64 / 255) << 24) | (JBM_FX.color_border & 0xFFFFFFu));
-            fill_rect(x, y + (int)(8.0f * k), (int)(2.0f * k) + 1, h - (int)(16.0f * k),
-                      ((u32)alpha << 24) | (JBM_FX.color_accent & 0xFFFFFFu));
+        int is_down = (i == pressed);
+        struct btnfx fx;
+        btn_effective(i, &fx);
+        int rr = (int)((float)fx.radius * k);
+        int border = (int)((float)fx.border * k);
+        if (border < 1 && fx.style != 2) border = 1;
+
+        /* Background fill: style 2 (minimal) paints only a selected row,
+         * style 1 (outline) keeps it transparent, style 3 (glass) uses a
+         * translucent fill, style 0 (solid) uses the configured colour. */
+        int fill_a = 0;
+        u32 fill = fx.bg;
+        if (fx.style == 0) fill_a = sel ? (is_down ? 150 : 56) : 6;
+        else if (fx.style == 1) fill_a = sel ? (is_down ? 80 : 28) : 0;
+        else if (fx.style == 2) fill_a = sel ? (is_down ? 70 : 34) : 0;
+        else if (fx.style == 3) fill_a = sel ? (is_down ? 190 : 110) : 60;
+        fill_a = fill_a * alpha / 255;
+        fill_a = fill_a * JBM_FX.button_alpha / 255;
+        if (fill_a > 0) {
+            u32 c = ((u32)fill_a << 24) | (fill & 0xFFFFFFu);
+            if (sel && !is_down) grad_rect(x, y, w, h, rr, c,
+                                           ((u32)(fill_a / 4) << 24) | (fx.bg & 0xFFFFFFu));
+            else fill_rect(x, y, w, h, c);
         }
+        if (fx.style != 2 || sel) {
+            u32 bc = ((u32)(alpha * (sel ? 220 : (fx.style == 1 ? 110 : 80)) / 255) << 24) |
+                     (fx.border_color & 0xFFFFFFu);
+            if (is_down || sel)
+                round_rect_border(x, y, w, h, rr, border > 0 ? border : 1,
+                                  ((u32)alpha << 24) | (fx.border_color & 0xFFFFFFu));
+            else if (fx.style != 2)
+                round_rect_border(x, y, w, h, rr, border > 0 ? border : 1, bc);
+        }
+        if (sel || is_down) {
+            u32 hl = is_down ? JBM_FX.color_pressed_bg : JBM_FX.color_accent;
+            fill_rect(x, y + (int)(8.0f * k), (int)(2.0f * k) + 1, h - (int)(16.0f * k),
+                      ((u32)alpha << 24) | (hl & 0xFFFFFFu));
+        }
+
         char lab[JBM_MAX_ENTRY_NAME];
         up_str(lab, act_name(i), sizeof(lab));
-        u32 base = sel ? JBM_FX.color_text_sel : JBM_FX.color_text;
+        u32 base = sel ? fx.text_sel : fx.text;
         u32 tc = ((u32)alpha << 24) | (base & 0xFFFFFFu);
-        draw_text_ls(&FN20, x + (int)(30.0f * k), y + h / 2, (float)JBM_FX.text_size * k,
-                     (int)(2.5f * k), tc, lab, TA_L | VA_M);
+
+        int pad = (int)(18.0f * k);
+        int icon_r = (int)((float)(h / 3) * (float)fx.icon_scale / 100.0f);
+        if (icon_r < 5) icon_r = 5;
+        if (icon_r > h / 2 - 4) icon_r = h / 2 - 4;
+        if (icon_r < 5) icon_r = 5;
+        int gap = (int)(10.0f * k);
+        float tpx = (float)JBM_FX.text_size * k;
+        int has_desc = JBM_FX.show_description && JBM_ENTRIES[i].description[0];
+        int ls = (int)(2.5f * k);
+        int dls = (int)(1.5f * k);
+        char desc[96];
+        desc[0] = 0;
+        int text_w = measure(&FN20, lab, tpx, ls);
+        if (has_desc) {
+            up_str(desc, JBM_ENTRIES[i].description, sizeof(desc));
+            int dw = measure(&FN20, desc, tpx * 0.72f, dls);
+            if (dw > text_w) text_w = dw;
+        }
+        const int icon_block = fx.show_icon ? icon_r * 2 + gap : 0;
+        int block = text_w + icon_block;
+        int block_x = x + pad;
+        if (fx.text_align == 1) block_x = x + (w - block) / 2;
+        else if (fx.text_align == 2) block_x = x + w - pad - block;
+        if (block_x < x + pad) block_x = x + pad;
+        int text_x = block_x + icon_block;
+        if (fx.show_icon)
+            draw_icon(icon_kind(&JBM_ENTRIES[i]), block_x + icon_r, y + h / 2, icon_r, tc);
+        int al = fx.text_align == 1 ? TA_C : (fx.text_align == 2 ? TA_R : TA_L);
+        int tx = fx.text_align == 1 ? text_x + text_w / 2
+                                    : (fx.text_align == 2 ? text_x + text_w : text_x);
+        if (has_desc) {
+            int th = (int)(tpx * 1.15f);
+            int dh = (int)(tpx * 0.72f);
+            int total = th + dh + (int)(3.0f * k);
+            int top = y + h / 2 - total / 2;
+            u32 shadow = (u32)(alpha * 150 / 255) << 24;
+            draw_text_ls(&FN20, tx + 1, top + 1, tpx, ls, shadow, lab, al | VA_T);
+            draw_text_ls(&FN20, tx, top, tpx, ls, tc, lab, al | VA_T);
+            u32 dc = ((u32)(alpha * 150 / 255) << 24) | (base & 0xFFFFFFu);
+            draw_text_ls(&FN20, tx + 1, top + th + 1, tpx * 0.72f, dls, shadow, desc, al | VA_T);
+            draw_text_ls(&FN20, tx, top + th, tpx * 0.72f, dls, dc, desc, al | VA_T);
+        } else {
+            u32 shadow = (u32)(alpha * 150 / 255) << 24;
+            draw_text_ls(&FN20, tx + 1, y + h / 2 + 1, tpx, ls, shadow, lab, al | VA_M);
+            draw_text_ls(&FN20, tx, y + h / 2, tpx, ls, tc, lab, al | VA_M);
+        }
     }
 
     int x0, y0, w0, h0;
@@ -3795,10 +4319,13 @@ static int selftest(void) {
              "button_width = 500\n"
              "menu_timeout_sec = 8\n"
              "show_countdown = 0\n"
-             "prefer_drm = 1\n");
+             "prefer_drm = 1\n"
+             "title = Selftest\n"
+             "show_description = 1\n"
+             "layout_margin = 9\n");
 
     jbm_sn(p, "%s/themes/test.ini", dir);
-    st_write(p, "color_border = 0xAABBCC\ntext_size = 21\n");
+    st_write(p, "color_border = 0xAABBCC\ntext_size = 21\nbutton_style = 1\nbutton_alpha = 180\n");
 
     jbm_sn(p, "%s/entries.ini", dir);
     st_write(p,
@@ -3814,6 +4341,13 @@ static int selftest(void) {
              "args = --verbose run\n"
              "order = 1\n"
              "default = 1\n"
+             "description = Runs a test\n"
+             "icon = script\n"
+             "button_style = 3\n"
+             "button_width = 600\n"
+             "button_radius = 24\n"
+             "text_align = 1\n"
+             "color_text_sel = #00FF00\n"
              "\n"
              "[off]\n"
              "name = Disabled\n"
@@ -3841,6 +4375,17 @@ static int selftest(void) {
     chk(JBM_FX.color_border == 0xFFAABBCCu, "fx: border from theme");
     chk(JBM_FX.text_size == 21, "fx: text_size from theme");
     chk(JBM_FX.button_width == 500, "fx: button_width from config");
+    chk(strcmp(JBM_CFG.title, "Selftest") == 0, "config: title");
+    chk(JBM_CFG.layout_margin == 9 && JBM_FX.layout_margin == 9, "config: layout_margin");
+    chk(JBM_FX.button_style == 1, "theme: button_style inherited");
+    chk(JBM_FX.button_alpha == 180, "theme: button_alpha parsed");
+    chk(JBM_ENTRIES[0].button_style == 3, "entry: button_style");
+    chk(JBM_ENTRIES[0].button_width == 600, "entry: button_width");
+    chk(JBM_ENTRIES[0].button_radius == 24, "entry: button_radius");
+    chk(JBM_ENTRIES[0].text_align == 1, "entry: text_align");
+    chk(JBM_ENTRIES[0].color_text_sel == 0xFF00FF00u, "entry: color_text_sel");
+    chk(strcmp(JBM_ENTRIES[0].description, "Runs a test") == 0, "entry: description");
+    { struct btnfx bfx; btn_effective(0, &bfx); chk(bfx.style == 3 && bfx.width == 600 && bfx.text_align == 1, "entry: effective style merge"); }
 
     /* 2x2 24-bpp BMP: top row red,green; bottom row blue,white. */
     jbm_sn(p, "%s/background.bmp", dir);

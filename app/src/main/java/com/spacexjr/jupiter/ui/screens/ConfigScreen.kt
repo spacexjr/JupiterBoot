@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Folder
@@ -49,10 +50,14 @@ import com.spacexjr.jupiter.ui.JupiterViewModel
 @Composable
 fun ConfigScreen(vm: JupiterViewModel, onFiles: () -> Unit) {
     val state by vm.config.collectAsStateWithLifecycle()
+    val profiles by vm.deviceProfiles.collectAsStateWithLifecycle()
     var showBackups by remember { mutableStateOf(false) }
     var infoDialog by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) { vm.loadConfig() }
+    LaunchedEffect(Unit) {
+        vm.loadConfig()
+        vm.loadDeviceProfiles()
+    }
 
     Column(Modifier.fillMaxSize()) {
         TopAppBar(
@@ -125,6 +130,42 @@ fun ConfigScreen(vm: JupiterViewModel, onFiles: () -> Unit) {
                             )
                             Spacer(Modifier.size(8.dp))
                             Text("Cor dinâmica (Android 12+)")
+                        }
+                    }
+                }
+            }
+
+            item {
+                Card {
+                    Column(Modifier.padding(16.dp)) {
+                        Text("Perfil de dispositivo", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "O perfil só altera orientação e calibração de toque no config.ini. " +
+                                "Valores automáticos (-1) não são sobrescritos.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(profiles) { profile ->
+                                FilterChip(
+                                    selected = vm.selectedProfileId() == profile.id,
+                                    onClick = { vm.applyDeviceProfile(profile.id) },
+                                    label = { Text(profile.name) },
+                                )
+                            }
+                        }
+                        val detected = vm.detectedProfile()
+                        if (detected != null) {
+                            Text(
+                                "Detectado: ${detected.name}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                        state.message?.let {
+                            Text(it, style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary)
                         }
                     }
                 }

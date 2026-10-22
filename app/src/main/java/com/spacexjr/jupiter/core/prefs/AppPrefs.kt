@@ -22,10 +22,27 @@ class AppPrefs(context: Context) {
         get() = prefs.getString(KEY_CONFIG_ROOT, "device") ?: "device"
         set(value) = prefs.edit { putString(KEY_CONFIG_ROOT, value) }
 
+    /** Versao do jbm_init instalada por atualizacao (vazio = usar o asset). */
+    var jbmInitVersion: String
+        get() = prefs.getString(KEY_JBM_INIT_VERSION, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_JBM_INIT_VERSION, value) }
+
+    var jbmInitSha256: String
+        get() = prefs.getString(KEY_JBM_INIT_SHA, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_JBM_INIT_SHA, value) }
+
+    /** Perfil de dispositivo selecionado; vazio = detectar automaticamente. */
+    var deviceProfileId: String
+        get() = prefs.getString(KEY_DEVICE_PROFILE, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_DEVICE_PROFILE, value) }
+
     companion object {
         private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_DYNAMIC_COLOR = "dynamic_color"
         private const val KEY_CONFIG_ROOT = "config_root"
+        private const val KEY_JBM_INIT_VERSION = "jbm_init_version"
+        private const val KEY_JBM_INIT_SHA = "jbm_init_sha"
+        private const val KEY_DEVICE_PROFILE = "device_profile"
     }
 }
 

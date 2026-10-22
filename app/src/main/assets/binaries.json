@@ -1,6 +1,6 @@
 {
   "abi": "arm64-v8a",
-  "jupiterBootVersion": "1.0",
+  "jupiterBootVersion": "1.1",
   "builtFrom": "https://github.com/spacexjr/JupiterBoot",
   "binaries": [
     {
@@ -17,9 +17,9 @@
       "name": "jbm_init",
       "asset": "bin/arm64-v8a/jbm_init",
       "file": "jbm_init",
-      "version": "1.0",
-      "size": 892968,
-      "sha256": "49ec4df0f2e9ef8d0fc5d7907193d51ea4c1e45affba7f11829b6f779502809a",
+      "version": "1.1",
+      "size": 909648,
+      "sha256": "4689eb59d94689656fafbf58a7bfcf74c005f362a052f82e7215c85762972ac6",
       "executable": true,
       "license": "JupiterBoot — compilado a partir de src/jbm_menu.c + src/start.S (clang aarch64 freestanding)"
     }

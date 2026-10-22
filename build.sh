@@ -31,6 +31,11 @@ MAGISKBOOT="$here/magiskboot"
 SRC="$here/src/jbm_menu.c"
 ASM="$here/src/start.S"
 BUILD="$here/out"
+HOST_ONLY=0
+if [ "${1:-}" = "--host-only" ]; then
+  HOST_ONLY=1
+  shift
+fi
 UNPACK="$BUILD/unpack"
 STAGE="$BUILD/stage"
 VERIFY="$BUILD/verify"
@@ -43,7 +48,7 @@ case "$IMG_IN" in
 esac
 IMG_OUT="$BUILD/boot-jbm.img"
 
-JBM_VERSION="${JBM_VERSION:-1.0}"
+JBM_VERSION="${JBM_VERSION:-1.1}"
 JBM_AUTOBOOT_SEC="${JBM_AUTOBOOT_SEC:-15}"
 JBM_TOTAL_TIMEOUT_SEC="${JBM_TOTAL_TIMEOUT_SEC:-240}"
 
@@ -51,10 +56,13 @@ say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m!!\033[0m %s\n' "$*" >&2; exit 1; }
 
 command -v "$CC" >/dev/null || die "clang not found"
-[ -x "$MAGISKBOOT" ] || die "magiskboot not found at $MAGISKBOOT"
-[ -f "$IMG_IN" ] || die "input boot image not found: $IMG_IN"
+if [ "$HOST_ONLY" -eq 0 ]; then
+  [ -x "$MAGISKBOOT" ] || die "magiskboot not found at $MAGISKBOOT"
+  [ -f "$IMG_IN" ] || die "input boot image not found: $IMG_IN"
+fi
 mkdir -p "$BUILD"
 
+if [ "$HOST_ONLY" -eq 0 ]; then
 say "compiling freestanding $TARGET binary"
 "$CC" \
   --target="$TARGET" \
@@ -71,6 +79,7 @@ if nm -u "$BUILD/jbm_init" 2>/dev/null | grep -q .; then
   nm -u "$BUILD/jbm_init" | head
   die "binary has undefined symbols"
 fi
+fi
 
 say "building host UI preview"
 "$CC" -DJBM_HOST -O2 -Wall -Wextra -Wno-unused-parameter -o "$BUILD/jbm_host" "$SRC"
@@ -86,6 +95,11 @@ done
 
 say "running host selftest (config/entries/theme/BMP)"
 "$BUILD/jbm_host" --selftest >/dev/null || die "host selftest failed"
+
+if [ "$HOST_ONLY" -eq 1 ]; then
+  say "host-only build finished (no boot image touched)"
+  exit 0
+fi
 
 say "unpacking $(basename "$IMG_IN")"
 rm -rf "$UNPACK" "$STAGE" "$VERIFY"

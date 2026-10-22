@@ -45,6 +45,7 @@ fun StatusCard(
     tone: StatusTone,
     subtitle: String? = null,
     modifier: Modifier = Modifier,
+    footer: (@Composable () -> Unit)? = null,
 ) {
     val visual = toneVisual(tone)
     Card(modifier = modifier.fillMaxWidth()) {
@@ -79,6 +80,7 @@ fun StatusCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                footer?.invoke()
             }
         }
     }

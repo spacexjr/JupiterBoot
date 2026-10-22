@@ -66,6 +66,32 @@ class EntriesIniParserTest {
         assertEquals(EntryType.SYSTEM, entries[0].type)
         assertTrue(entries[0].isDefault)
         assertEquals(EntryType.POWEROFF, entries[5].type)
+        assertEquals("Start Android", entries[0].description)
+        assertEquals("system", entries[0].icon)
+    }
+
+    @Test
+    fun parsesPerButtonAppearance() {
+        val doc = EntriesIniParser.parse(
+            "[x]\nname = X\ntype = script\ndescription = Runs\nicon = script\n" +
+                "button_style = 3\nbutton_width = 640\nbutton_height = 120\n" +
+                "button_radius = 22\nbutton_border_width = 2\ntext_align = 2\n" +
+                "icon_scale = 130\nshow_icon = 0\ncolor_bg = #101010\n" +
+                "color_border = #202020\ncolor_text = #303030\ncolor_text_sel = #404040\n",
+        )
+        val x = EntriesIniParser.toModel(doc).first()
+        assertEquals("Runs", x.description)
+        assertEquals("script", x.icon)
+        assertEquals(3, x.buttonStyle)
+        assertEquals(640, x.buttonWidth)
+        assertEquals(120, x.buttonHeight)
+        assertEquals(22, x.buttonRadius)
+        assertEquals(2, x.buttonBorderWidth)
+        assertEquals(2, x.textAlign)
+        assertEquals(130, x.iconScale)
+        assertEquals(0, x.showIcon)
+        assertEquals(0xFF101010.toInt(), x.colorBg)
+        assertEquals(0xFF404040.toInt(), x.colorTextSel)
     }
 }
 
@@ -95,6 +121,24 @@ class EntriesIniSerializerTest {
         )
         val out = EntriesIniSerializer.write(entries, headerLines = emptyList())
         assertTrue(out.indexOf("[a]") < out.indexOf("[b]"))
+    }
+
+    @Test
+    fun perButtonAppearanceRoundTrips() {
+        val e = JbmEntry("x", "X", EntryType.SCRIPT, description = "D", icon = "script",
+            buttonStyle = 3, buttonWidth = 600, buttonRadius = 20, textAlign = 1,
+            showIcon = 0, colorTextSel = 0xFF00FF00.toInt())
+        val out = EntriesIniSerializer.write(listOf(e), headerLines = emptyList())
+        assertTrue(out.contains("description = D"))
+        assertTrue(out.contains("button_style = 3"))
+        assertTrue(out.contains("show_icon = 0"))
+        val x = EntriesIniParser.toModel(EntriesIniParser.parse(out)).first()
+        assertEquals(3, x.buttonStyle)
+        assertEquals(600, x.buttonWidth)
+        assertEquals(20, x.buttonRadius)
+        assertEquals(1, x.textAlign)
+        assertEquals(0, x.showIcon)
+        assertEquals(0xFF00FF00.toInt(), x.colorTextSel)
     }
 
     @Test
@@ -144,6 +188,19 @@ class EntriesValidatorTest {
     fun invalidIdIsFlagged() {
         val entries = listOf(JbmEntry("bad id", "A", EntryType.SYSTEM))
         assertTrue(EntriesValidator.validate(entries).any { it.message.contains("id invalido") })
+    }
+
+    @Test
+    fun invalidPerButtonValuesAreFlagged() {
+        val entries = listOf(
+            JbmEntry("x", "X", EntryType.SYSTEM, buttonStyle = 9, textAlign = 5,
+                buttonWidth = 10, buttonRadius = -5),
+        )
+        val issues = EntriesValidator.validate(entries)
+        assertTrue(issues.any { it.message.contains("button_style") })
+        assertTrue(issues.any { it.message.contains("text_align") })
+        assertTrue(issues.any { it.message.contains("button_width") })
+        assertTrue(issues.any { it.message.contains("button_radius") })
     }
 
     @Test

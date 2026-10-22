@@ -6,6 +6,7 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Icon
@@ -28,6 +29,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.spacexjr.jupiter.R
+import com.spacexjr.jupiter.ui.screens.AppearanceScreen
 import com.spacexjr.jupiter.ui.screens.ConfigScreen
 import com.spacexjr.jupiter.ui.screens.EntriesScreen
 import com.spacexjr.jupiter.ui.screens.FilesScreen
@@ -39,11 +41,12 @@ import com.spacexjr.jupiter.ui.theme.JupiterTheme
 sealed class Dest(val route: String, val labelRes: Int, val icon: ImageVector) {
     data object Home : Dest("home", R.string.nav_home, Icons.Filled.Home)
     data object Entries : Dest("entries", R.string.nav_entries, Icons.Filled.List)
+    data object Appearance : Dest("appearance", R.string.nav_appearance, Icons.Filled.Palette)
     data object Logs : Dest("logs", R.string.nav_logs, Icons.Filled.Terminal)
     data object Settings : Dest("settings", R.string.nav_settings, Icons.Filled.Settings)
 }
 
-private val bottomDestinations = listOf(Dest.Home, Dest.Entries, Dest.Logs, Dest.Settings)
+private val bottomDestinations = listOf(Dest.Home, Dest.Entries, Dest.Appearance, Dest.Logs, Dest.Settings)
 
 @Composable
 fun JupiterRoot(vm: JupiterViewModel) {
@@ -98,6 +101,7 @@ fun JupiterRoot(vm: JupiterViewModel) {
                     )
                 }
                 composable(Dest.Entries.route) { EntriesScreen(vm) }
+                composable(Dest.Appearance.route) { AppearanceScreen(vm) }
                 composable(Dest.Logs.route) { LogsScreen(vm) }
                 composable(Dest.Settings.route) {
                     ConfigScreen(vm, onFiles = { navController.navigate(FilesScreen.ROUTE) })

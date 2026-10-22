@@ -12,6 +12,12 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 
+data class TrustedBinary(
+    val name: String,
+    val version: String,
+    val sha256: String,
+)
+
 data class BinarySpec(
     val name: String,
     val asset: String,
@@ -38,6 +44,9 @@ enum class BinaryState {
 
     /** Ainda não instalado. */
     MISSING,
+
+    /** Instalado por atualização explícita do GitHub e validado por hash. */
+    UPDATED,
 }
 
 data class BinaryStatus(
@@ -79,17 +88,19 @@ class BinaryInstaller(
         return parseManifest(json)
     }
 
-    suspend fun ensureInstalled(): List<BinaryStatus> {
+    suspend fun ensureInstalled(trusted: List<TrustedBinary> = emptyList()): List<BinaryStatus> {
         val specs = manifest()
         if (specs.isEmpty()) {
             log.append(LogLevel.ERROR, LogSource.BINARIES, "binaries.json ausente ou ilegível")
             return emptyList()
         }
         withContext(Dispatchers.IO) { targetDir.mkdirs() }
-        return specs.map { ensureOne(it) }
+        return specs.map { spec ->
+            ensureOne(spec, trusted.firstOrNull { it.name == spec.name })
+        }
     }
 
-    private suspend fun ensureOne(spec: BinarySpec): BinaryStatus {
+    private suspend fun ensureOne(spec: BinarySpec, trusted: TrustedBinary?): BinaryStatus {
         val target = File(targetDir, spec.file)
 
         val usable = withContext(Dispatchers.IO) { target.isFile && target.length() > 0L }
@@ -112,8 +123,24 @@ class BinaryInstaller(
 
         val hashOk = hash != null && hash.equals(spec.sha256, ignoreCase = true)
         val elfOk = elf?.isAarch64 == true
+        val trustedOk = trusted != null && hash != null &&
+            hash.equals(trusted.sha256, ignoreCase = true) && elfOk
 
         return when {
+            trustedOk -> {
+                log.append(
+                    LogLevel.INFO, LogSource.BINARIES,
+                    "${spec.name}: atualizado via GitHub (${trusted!!.version})",
+                )
+                BinaryStatus(
+                    spec = spec,
+                    state = BinaryState.UPDATED,
+                    path = target,
+                    detail = "atualizado via GitHub ${trusted.version}; hash e ELF conferem",
+                    elfDescription = elf?.describe,
+                    executableNow = validateExecution(spec, target),
+                )
+            }
             hashOk && elfOk -> {
                 if (spec.executable && !withContext(Dispatchers.IO) { target.canExecute() }) {
                     withContext(Dispatchers.IO) { target.setExecutable(true, false) }

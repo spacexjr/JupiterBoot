@@ -3,6 +3,7 @@
     <string name="app_name">Jupiter</string>
     <string name="nav_home">Início</string>
     <string name="nav_entries">Entries</string>
+    <string name="nav_appearance">Aparência</string>
     <string name="nav_logs">Logs</string>
     <string name="nav_settings">Configurações</string>
     <string name="patch_title">Patch de boot</string>

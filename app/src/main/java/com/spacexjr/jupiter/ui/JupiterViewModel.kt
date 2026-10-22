@@ -2,6 +2,8 @@ package com.spacexjr.jupiter.ui
 
 import android.app.Application
 import android.content.ContentValues
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -10,6 +12,7 @@ import androidx.lifecycle.viewModelScope
 import com.spacexjr.jupiter.core.binaries.BinaryInstaller
 import com.spacexjr.jupiter.core.binaries.BinaryState
 import com.spacexjr.jupiter.core.binaries.BinaryStatus
+import com.spacexjr.jupiter.core.binaries.TrustedBinary
 import com.spacexjr.jupiter.core.config.ConfigIni
 import com.spacexjr.jupiter.core.config.ConfigIniParser
 import com.spacexjr.jupiter.core.config.ConfigIniSerializer
@@ -18,6 +21,8 @@ import com.spacexjr.jupiter.core.config.EntriesIniParser
 import com.spacexjr.jupiter.core.config.EntriesIniSerializer
 import com.spacexjr.jupiter.core.config.EntriesValidator
 import com.spacexjr.jupiter.core.config.JbmEntry
+import com.spacexjr.jupiter.core.config.ThemeIni
+import com.spacexjr.jupiter.core.device.DeviceProfile
 import com.spacexjr.jupiter.core.log.LogEntry
 import com.spacexjr.jupiter.core.log.LogLevel
 import com.spacexjr.jupiter.core.log.LogSource
@@ -43,6 +48,8 @@ import com.spacexjr.jupiter.core.store.LocalConfigRoot
 import com.spacexjr.jupiter.core.store.StoreEntry
 import com.spacexjr.jupiter.core.update.GitHubReleaseClient
 import com.spacexjr.jupiter.core.update.UpdateCheckResult
+import com.spacexjr.jupiter.core.update.UpdateInstallResult
+import com.spacexjr.jupiter.core.update.UpdateInstaller
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -70,6 +77,9 @@ data class HomeUiState(
     val lastPatchSummary: String? = null,
     val binaries: List<BinaryStatus> = emptyList(),
     val update: UpdateCheckResult? = null,
+    val updateInstalling: Boolean = false,
+    val updateMessage: String? = null,
+    val updateError: String? = null,
     val error: String? = null,
     val loading: Boolean = false,
 )
@@ -106,6 +116,19 @@ data class ConfigUiState(
     val backups: List<String> = emptyList(),
 )
 
+data class AppearanceUiState(
+    val themes: Map<String, ThemeIni> = emptyMap(),
+    val selectedName: String = ConfigIni.defaults().theme,
+    val backgroundPreview: Bitmap? = null,
+    val backgroundApplied: Boolean = false,
+    val dirty: Boolean = false,
+    val message: String? = null,
+    val error: String? = null,
+) {
+    val selectedTheme: ThemeIni
+        get() = themes[selectedName] ?: ThemeIni.defaults().copy(name = selectedName)
+}
+
 data class FilesUiState(
     val path: String = "",
     val entries: List<StoreEntry> = emptyList(),
@@ -127,6 +150,7 @@ class JupiterViewModel(app: Application) : AndroidViewModel(app) {
     private val patchesDir: File = File(appDir, "patches")
 
     private val operationLog = OperationLog(File(logsDir, "operations.log"))
+    private val updateInstaller = UpdateInstaller(operationLog)
     private val runner: CommandRunner = ProcessCommandRunner()
     private val rootService = RootService(runner, operationLog)
     private val prefs = AppPrefs(app)
@@ -172,6 +196,12 @@ class JupiterViewModel(app: Application) : AndroidViewModel(app) {
     private val _config = MutableStateFlow(ConfigUiState())
     val config: StateFlow<ConfigUiState> = _config.asStateFlow()
 
+    private val _appearance = MutableStateFlow(AppearanceUiState())
+    val appearance: StateFlow<AppearanceUiState> = _appearance.asStateFlow()
+
+    private val _deviceProfiles = MutableStateFlow<List<DeviceProfile>>(emptyList())
+    val deviceProfiles: StateFlow<List<DeviceProfile>> = _deviceProfiles.asStateFlow()
+
     private val _files = MutableStateFlow(FilesUiState())
     val files: StateFlow<FilesUiState> = _files.asStateFlow()
 
@@ -212,6 +242,7 @@ class JupiterViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshAll() {
         viewModelScope.launch {
             _home.value = _home.value.copy(loading = true, error = null)
+            loadDeviceProfiles()
             installBinaries()
             loadDeviceInfo()
             loadLastPatch()
@@ -221,7 +252,12 @@ class JupiterViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun installBinaries() {
-        val statuses = binaryInstaller.ensureInstalled()
+        val trusted = if (prefs.jbmInitSha256.isNotBlank() && prefs.jbmInitVersion.isNotBlank()) {
+            listOf(TrustedBinary("jbm_init", prefs.jbmInitVersion, prefs.jbmInitSha256))
+        } else {
+            emptyList()
+        }
+        val statuses = binaryInstaller.ensureInstalled(trusted)
         manifestJsonCache = withContext(Dispatchers.IO) {
             try {
                 getApplication<Application>().assets.open("binaries.json").use {
@@ -231,11 +267,15 @@ class JupiterViewModel(app: Application) : AndroidViewModel(app) {
                 null
             }
         }
-        val jbVersion = manifestJsonCache?.let { BinaryInstaller.jupiterBootVersion(it) }
-        val okCount = statuses.count { it.state == BinaryState.OK || it.state == BinaryState.INSTALLED_NOW }
+        val bundledVersion = manifestJsonCache?.let { BinaryInstaller.jupiterBootVersion(it) }
+        val installedVersion = prefs.jbmInitVersion.ifBlank { bundledVersion }
+        val okCount = statuses.count {
+            it.state == BinaryState.OK || it.state == BinaryState.INSTALLED_NOW ||
+                it.state == BinaryState.UPDATED
+        }
         _home.value = _home.value.copy(
             binaries = statuses,
-            jupiterBootVersion = jbVersion,
+            jupiterBootVersion = installedVersion,
             error = if (okCount != statuses.size) {
                 "Alguns binários não passaram na validação (veja a tela inicial)."
             } else null,
@@ -315,6 +355,84 @@ class JupiterViewModel(app: Application) : AndroidViewModel(app) {
             val result = githubClient.checkForUpdate(local)
             _home.value = _home.value.copy(update = result)
         }
+    }
+
+    fun installUpdate() {
+        val available = _home.value.update as? UpdateCheckResult.UpdateAvailable ?: return
+        viewModelScope.launch {
+            _home.value = _home.value.copy(
+                updateInstalling = true,
+                updateMessage = null,
+                updateError = null,
+            )
+            val result = updateInstaller.install(available.release, binariesDir)
+            when (result) {
+                is UpdateInstallResult.Installed -> {
+                    prefs.jbmInitVersion = result.version.removePrefix("v")
+                    prefs.jbmInitSha256 = result.sha256
+                    operationLog.append(
+                        LogLevel.INFO, LogSource.UPDATE,
+                        "jbm_init ${result.version} instalado em ${result.path} (nada executado)",
+                    )
+                    installBinaries()
+                    _home.value = _home.value.copy(
+                        updateInstalling = false,
+                        updateMessage = "jbm_init ${result.version} instalado. " +
+                            "O patch continua sendo uma ação separada e confirmada.",
+                        updateError = null,
+                    )
+                }
+                is UpdateInstallResult.Failed -> {
+                    _home.value = _home.value.copy(
+                        updateInstalling = false,
+                        updateError = result.message,
+                    )
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------- profiles
+    fun loadDeviceProfiles() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val profiles = try {
+                getApplication<Application>().assets.open("device_profiles.json").use {
+                    DeviceProfile.parse(it.readBytes().decodeToString())
+                }
+            } catch (_: Exception) {
+                emptyList()
+            }
+            withContext(Dispatchers.Main) { _deviceProfiles.value = profiles }
+        }
+    }
+
+    fun selectedProfileId(): String = prefs.deviceProfileId
+
+    fun detectedProfile(): DeviceProfile? {
+        val codename = _home.value.deviceCodename ?: return null
+        return DeviceProfile.detect(_deviceProfiles.value, codename)
+    }
+
+    fun selectDeviceProfile(id: String) {
+        prefs.deviceProfileId = id
+        _deviceProfiles.value = _deviceProfiles.value
+    }
+
+    fun applyDeviceProfile(id: String) {
+        val profile = _deviceProfiles.value.firstOrNull { it.id == id } ?: return
+        prefs.deviceProfileId = id
+        updateConfig { cfg ->
+            cfg.copy(
+                orientation = profile.orientation,
+                touchCalX0 = if (profile.touchCalX0 >= 0) profile.touchCalX0 else cfg.touchCalX0,
+                touchCalY0 = if (profile.touchCalY0 >= 0) profile.touchCalY0 else cfg.touchCalY0,
+                touchCalX1 = if (profile.touchCalX1 >= 0) profile.touchCalX1 else cfg.touchCalX1,
+                touchCalY1 = if (profile.touchCalY1 >= 0) profile.touchCalY1 else cfg.touchCalY1,
+            )
+        }
+        _config.value = _config.value.copy(
+            message = "Perfil ${profile.name} aplicado ao config.ini; salve para gravar.",
+        )
     }
 
     // ---------------------------------------------------------------- patch
@@ -779,6 +897,159 @@ class JupiterViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
             loadConfig()
+        }
+    }
+
+    // ----------------------------------------------------------- appearance
+    fun loadAppearance() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val root = currentRoot()
+            val names = root.listDirectory("themes")
+                .filter { !it.isDirectory && it.name.endsWith(".ini") }
+                .map { it.name.removeSuffix(".ini") }
+                .sorted()
+            val themes = names.associateWith { name ->
+                val text = root.readText("themes/$name.ini")
+                if (text == null) ThemeIni(name = name) else ThemeIni.parse(name, text)
+            }
+            val configured = root.readText("config.ini")
+                ?.let { ConfigIniParser.parse(it).theme }
+                ?.ifEmpty { "default" }
+                ?: _config.value.config.theme.ifEmpty { "default" }
+            val selected = if (themes.containsKey(configured)) configured
+            else themes.keys.firstOrNull() ?: configured
+            val preview = if (root.exists("background.bmp")) {
+                val tmp = File(appDir, "preview-background.bmp")
+                if (root.exportToFile("background.bmp", tmp)) BitmapFactory.decodeFile(tmp.absolutePath) else null
+            } else null
+            withContext(Dispatchers.Main) {
+                _appearance.value = _appearance.value.copy(
+                    themes = themes,
+                    selectedName = selected,
+                    backgroundPreview = preview,
+                    error = if (themes.isEmpty()) "Nenhum tema encontrado em themes/." else null,
+                    message = null,
+                )
+            }
+        }
+    }
+
+    fun selectTheme(name: String) {
+        val state = _appearance.value
+        if (!state.themes.containsKey(name)) return
+        _appearance.value = state.copy(selectedName = name, dirty = false, message = null, error = null)
+        updateConfig { it.copy(theme = name) }
+    }
+
+    fun updateTheme(transform: (ThemeIni) -> ThemeIni) {
+        val state = _appearance.value
+        val before = ThemeIni.resolve(state.selectedName, state.themes)
+        val next = ThemeIni.markChanged(before, transform(before))
+        _appearance.value = state.copy(
+            themes = state.themes + (state.selectedName to next),
+            dirty = true,
+            message = null,
+            error = null,
+        )
+    }
+
+    fun saveTheme() {
+        val state = _appearance.value
+        val theme = state.selectedTheme
+        if (!Regex("^[A-Za-z0-9._-]{1,63}$").matches(state.selectedName)) {
+            _appearance.value = state.copy(error = "Nome de tema invalido.")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val root = currentRoot()
+            val rel = "themes/${state.selectedName}.ini"
+            root.backup(rel)
+            val ok = root.writeAtomic(rel, ThemeIni.serialize(theme))
+            operationLog.append(
+                if (ok) LogLevel.INFO else LogLevel.ERROR,
+                LogSource.CONFIG,
+                "gravação de $rel: ${if (ok) "ok" else "falha"}",
+            )
+            withContext(Dispatchers.Main) {
+                _appearance.value = _appearance.value.copy(
+                    dirty = !ok,
+                    message = if (ok) "Tema ${state.selectedName} gravado (backup criado)." else null,
+                    error = if (ok) null else "Falha ao gravar o tema",
+                )
+            }
+        }
+    }
+
+    fun createTheme(name: String) {
+        val clean = name.trim()
+        if (!Regex("^[A-Za-z0-9._-]{1,63}$").matches(clean)) {
+            _appearance.value = _appearance.value.copy(error = "Use letras, numeros, ponto, hifen ou _.")
+            return
+        }
+        val state = _appearance.value
+        if (state.themes.containsKey(clean)) {
+            _appearance.value = state.copy(error = "Ja existe um tema com esse nome.")
+            return
+        }
+        val base = state.selectedTheme.copy(name = clean, extends = "")
+        _appearance.value = state.copy(
+            themes = state.themes + (clean to base),
+            selectedName = clean,
+            dirty = true,
+            message = "Tema $clean criado na memoria; salve para gravar.",
+            error = null,
+        )
+    }
+
+    fun deleteTheme(name: String) {
+        if (name == _config.value.config.theme) {
+            _appearance.value = _appearance.value.copy(
+                error = "Nao e possivel apagar o tema em uso.",
+            )
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val root = currentRoot()
+            val ok = root.delete("themes/$name.ini")
+            withContext(Dispatchers.Main) {
+                val state = _appearance.value
+                _appearance.value = if (ok) state.copy(
+                    themes = state.themes - name,
+                    selectedName = if (state.selectedName == name) {
+                        state.themes.keys.firstOrNull { it != name } ?: "default"
+                    } else state.selectedName,
+                    message = "Tema $name removido.",
+                    error = null,
+                ) else state.copy(error = "Falha ao remover o tema.")
+            }
+        }
+    }
+
+    fun importBackground(source: File) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val root = currentRoot()
+            val decoded = BitmapFactory.decodeFile(source.absolutePath)
+            val ok = root.copyIntoAppFile("background.bmp", source)
+            operationLog.append(
+                if (ok) LogLevel.INFO else LogLevel.ERROR,
+                LogSource.CONFIG,
+                "importação de background.bmp: ${if (ok) "ok" else "falha"}",
+            )
+            withContext(Dispatchers.Main) {
+                _appearance.value = _appearance.value.copy(
+                    backgroundPreview = if (ok) decoded else _appearance.value.backgroundPreview,
+                    backgroundApplied = ok,
+                    message = if (ok) "background.bmp gravado em ${root.displayPath}." else null,
+                    error = if (ok) null else "Falha ao gravar background.bmp",
+                )
+                if (ok) {
+                    _config.value = _config.value.copy(
+                        config = _config.value.config.copy(background = "${root.displayPath}/background.bmp"),
+                        dirty = true,
+                    )
+                    saveConfig()
+                }
+            }
         }
     }
 
