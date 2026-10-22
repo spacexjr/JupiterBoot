@@ -145,7 +145,7 @@ struct jbm_timespec {
 #define JBM_AUTOBOOT_SEC 15
 #endif
 #ifndef JBM_VERSION
-#define JBM_VERSION "1.0"
+#define JBM_VERSION "1.1"
 #endif
 #ifndef JBM_TOTAL_TIMEOUT_SEC
 #define JBM_TOTAL_TIMEOUT_SEC 240
@@ -315,7 +315,7 @@ static i64 hs_reboot_cmd(int cmd, int sub) {
 #define O_TRUNC 512
 #define O_APPEND 1024
 #define O_NONBLOCK 2048
-#define O_DIRECTORY 65536
+#define O_DIRECTORY 040000
 
 #define SIGCHLD 17
 
@@ -1637,7 +1637,7 @@ static int jbm_mount_cache_dev(const char *node, int known_cache) {
 static int jbm_block_node(const char *name, char *node, u32 cap) {
     char devp[128], raw[64];
     jbm_sn(devp, "/sys/class/block/%s/dev", name);
-    if (jbm_read_text(devp, raw, sizeof(raw)) <= 0) return -1;
+    if (jbm_read_text(devp, raw, sizeof(raw)) != 0) return -1;
     const char *colon = strchr(raw, ':');
     if (!colon) return -1;
     int maj = jbm_atoi_(raw), min = jbm_atoi_(colon + 1);
@@ -1737,7 +1737,7 @@ static void jbm_cache_init(void) {
     for (int i = 0; i < count; i++) {
         char uevp[128], uev[256];
         jbm_sn(uevp, "/sys/class/block/%s/uevent", names[i]);
-        if (jbm_read_text(uevp, uev, sizeof(uev)) <= 0) continue;
+        if (jbm_read_text(uevp, uev, sizeof(uev)) != 0) continue;
         if (!jbm_uevent_is_cache(uev)) continue;
         char node[96];
         if (jbm_block_node(names[i], node, sizeof(node)) != 0) continue;
@@ -2228,7 +2228,7 @@ static int drm_node(void) {
     int fd = jbm_open("/dev/dri/card0", O_RDWR, 0);
     if (fd >= 0) return fd;
     char raw[64];
-    if (jbm_read_text("/sys/class/drm/card0/dev", raw, sizeof(raw)) <= 0) return -1;
+    if (jbm_read_text("/sys/class/drm/card0/dev", raw, sizeof(raw)) != 0) return -1;
     const char *colon = strchr(raw, ':');
     if (!colon) return -1;
     int maj = jbm_atoi_(raw), min = jbm_atoi_(colon + 1);
