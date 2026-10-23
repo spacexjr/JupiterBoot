@@ -34,7 +34,7 @@ jobs:
           clang --target=aarch64-linux-gnu -ffreestanding -nostdlib -static \
             -fno-builtin -fno-stack-protector -fuse-ld=lld -Os \
             -Wall -Wextra -Wno-unused-parameter \
-            -DJBM_REAL_INIT='"/init.system"' -DJBM_VERSION='"1.1"' \
+            -DJBM_REAL_INIT='"/init.system"' -DJBM_VERSION='"1.2"' \
             -DJBM_AUTOBOOT_SEC=15 -DJBM_TOTAL_TIMEOUT_SEC=240 \
             -o out/jbm_init src/jbm_menu.c src/start.S \
             -Wl,-e,_start -Wl,--gc-sections

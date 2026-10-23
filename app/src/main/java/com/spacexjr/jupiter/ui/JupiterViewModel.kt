@@ -65,7 +65,7 @@ import java.util.Locale
 enum class HomeState { LOADING, ERROR }
 
 data class HomeUiState(
-    val appVersion: String = "1.0.0",
+    val appVersion: String = "1.2",
     val jupiterBootVersion: String? = null,
     val rootAvailable: Boolean? = null,
     val kernelVersion: String? = null,

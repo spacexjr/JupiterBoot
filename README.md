@@ -233,7 +233,7 @@ host before deploying it to the device.
 Build-time constants can be overridden through environment variables:
 
 ```sh
-JBM_AUTOBOOT_SEC=10 JBM_VERSION=1.1 ./build.sh
+JBM_AUTOBOOT_SEC=10 JBM_VERSION=1.2 ./build.sh
 ```
 
 ### Runtime configuration
@@ -444,7 +444,7 @@ available before testing.
 
 # Jupiter — Android Boot Manager
 
-`com.spacexjr.jupiter` · version 1.0.0 · minSdk 26 (Android 8) · targetSdk 35 · arm64-v8a
+`com.spacexjr.jupiter` · version 1.2 · minSdk 26 (Android 8) · targetSdk 35 · arm64-v8a
 
 ---
 

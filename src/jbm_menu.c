@@ -197,7 +197,7 @@ struct jbm_timespec {
 #define JBM_AUTOBOOT_SEC 15
 #endif
 #ifndef JBM_VERSION
-#define JBM_VERSION "1.1"
+#define JBM_VERSION "1.2"
 #endif
 #ifndef JBM_TOTAL_TIMEOUT_SEC
 #define JBM_TOTAL_TIMEOUT_SEC 240
