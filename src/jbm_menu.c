@@ -1012,8 +1012,9 @@ static void jbm_set_default_config(jbm_config_t *cfg) {
     cfg->text_align = 0;
     cfg->layout_margin = 7;
     cfg->show_title = 1;
-    cfg->show_description = 1;
-    cfg->show_icons = 1;
+    /* Text-only by default: names only, no descriptions or glyphs. */
+    cfg->show_description = 0;
+    cfg->show_icons = 0;
     cfg->icon_scale = 100;
     cfg->menu_timeout_sec = JBM_AUTOBOOT_SEC;
     cfg->default_entry = -1;
@@ -1053,8 +1054,8 @@ static void jbm_set_default_theme(jbm_theme_t *theme) {
     theme->text_align = 0;
     theme->layout_margin = 7;
     theme->show_title = 1;
-    theme->show_description = 1;
-    theme->show_icons = 1;
+    theme->show_description = 0;
+    theme->show_icons = 0;
     theme->icon_scale = 100;
 }
 
@@ -1653,10 +1654,12 @@ static void jbm_write_default_entries_file(void) {
                 "# defaults back. type: system|recovery|fastboot|download|\n"
                 "# reboot|poweroff|script|binary\n\n");
     for (int i = 0; i < JBM_NUM_BUILTINS; i++) {
-        jbm_sn(t, "[%s]\nname = %s\ndescription = %s\nicon = %s\ntype = %s\n"
+        /* No `icon` line: the default modes render as text only. Users can
+         * still add `icon = ...` plus show_icons = 1 to opt back in. */
+        jbm_sn(t, "[%s]\nname = %s\ndescription = %s\ntype = %s\n"
                   "enabled = 1\norder = %d\ndefault = %d\n",
                JBM_BUILTINS[i].id, JBM_BUILTINS[i].name, jbm_builtin_description(i),
-               jbm_builtin_icon(i), jbm_entry_type_name(JBM_BUILTINS[i].type),
+               jbm_entry_type_name(JBM_BUILTINS[i].type),
                i, i == 0 ? 1 : 0);
         o = jbm_app(b, sizeof(b), o, t);
         if (i + 1 < JBM_NUM_BUILTINS) o = jbm_app(b, sizeof(b), o, "\n");

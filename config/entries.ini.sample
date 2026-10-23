@@ -18,7 +18,6 @@
 [system]
 name = System
 description = Start Android
-icon = system
 type = system
 order = 0
 enabled = 1

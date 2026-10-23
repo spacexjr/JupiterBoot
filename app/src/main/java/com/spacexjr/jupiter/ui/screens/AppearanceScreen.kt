@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image as ImageView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -60,14 +61,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -76,7 +84,6 @@ import com.spacexjr.jupiter.core.config.ConfigIni
 import com.spacexjr.jupiter.core.config.EffectiveButtonStyle
 import com.spacexjr.jupiter.core.config.EffectiveMenuStyle
 import com.spacexjr.jupiter.core.config.JbmEntry
-import com.spacexjr.jupiter.core.config.MenuGeometry
 import com.spacexjr.jupiter.core.config.TextAlign as MenuAlign
 import com.spacexjr.jupiter.core.config.ThemeIni
 import com.spacexjr.jupiter.core.image.BmpWriter
@@ -216,9 +223,6 @@ fun AppearanceScreen(vm: JupiterViewModel) {
                         SliderRow("Texto", menu.textSize.toFloat(), 10f, 48f) { v ->
                             vm.updateTheme { it.copy(textSize = v.toInt()) }
                         }
-                        SliderRow("Ícone", menu.iconScale.toFloat(), 50f, 200f) { v ->
-                            vm.updateTheme { it.copy(iconScale = v.toInt()) }
-                        }
                         AlignChips(menu.textAlign) { v ->
                             vm.updateTheme { it.copy(textAlign = v) }
                         }
@@ -227,6 +231,11 @@ fun AppearanceScreen(vm: JupiterViewModel) {
                         }
                         ToggleLine("Mostrar ícones", menu.showIcons) { v ->
                             vm.updateTheme { it.copy(showIcons = v) }
+                        }
+                        if (menu.showIcons) {
+                            SliderRow("Tamanho do ícone", menu.iconScale.toFloat(), 50f, 200f) { v ->
+                                vm.updateTheme { it.copy(iconScale = v.toInt()) }
+                            }
                         }
                     }
                 }
@@ -464,6 +473,32 @@ private fun MenuPreview(
         val previewHeight = (maxWidth.value * 1600f / 720f).coerceAtMost(520f)
         val previewWidth = previewHeight * 720f / 1600f
         val k = previewWidth / 720f
+        // Espelha draw_text_ls(): o texto do firmware e medido em pixels do
+        // painel, nao em sp. Dividir por fontScale mantem o preview fiel mesmo
+        // quando o usuario aumenta a fonte do sistema.
+        val fontScale = LocalDensity.current.fontScale
+        fun scaledSp(designPx: Float) = (designPx * k / fontScale).sp
+
+        val margin = 720f * menu.layoutMargin / 100f
+        val showHeader = menu.showTitle && cfg.showBrand
+        val headerTop = 1600f * 0.09f
+        val menuTop = headerTop + (if (showHeader) 38f + 5f else 0f) + 45f
+
+        // Mesma regra de visible_rows(): so entradas habilitadas, ordenadas
+        // por `order`, e apenas as que cabem acima do rodape.
+        val active = entries.filter { it.enabled }.sortedBy { it.order }
+        val footer = 150f
+        var used = 0f
+        var rows = 0
+        for (entry in active) {
+            val h = EffectiveButtonStyle.resolve(entry, menu).height.toFloat()
+            val need = h + menu.buttonSpacing
+            if (used + need > 1600f - menuTop - footer && rows > 0) break
+            used += need
+            rows++
+        }
+        val visible = active.take(rows.coerceAtLeast(1))
+
         Box(
             Modifier.width(previewWidth.dp).height(previewHeight.dp)
                 .clip(RoundedCornerShape(10.dp))
@@ -477,81 +512,238 @@ private fun MenuPreview(
                     contentScale = ContentScale.Crop,
                 )
             }
-            if (!menu.showTitle || !cfg.showBrand) {
-                Spacer(Modifier.height((1600f * 0.09f * k).dp))
-            } else {
-                Column(Modifier.padding(top = (1600f * 0.09f * k).dp, start = (720f * menu.layoutMargin / 100f * k).dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            Modifier.size((38f * k).dp)
-                                .clip(RoundedCornerShape(50))
-                                .border((2f * k).dp, argb(menu.colorBorder), RoundedCornerShape(50)),
+
+            if (showHeader) {
+                Row(
+                    Modifier.padding(start = (margin * k).dp, top = (headerTop * k).dp)
+                        .height((38f * k).dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Canvas(Modifier.size((38f * k).dp)) {
+                        val r = size.minDimension / 2f
+                        val border = argb(menu.colorBorder)
+                        drawCircle(
+                            color = border,
+                            radius = r,
+                            style = Stroke(width = (2f * k).coerceAtLeast(1f)),
                         )
-                        Spacer(Modifier.width((14f * k).dp))
-                        Text(cfg.title, color = Color(0xFFEEEEEE), fontSize = (28f * k).sp,
-                            fontWeight = FontWeight.SemiBold)
-                        Text(cfg.subtitle, color = argb(menu.colorAccent), fontSize = (28f * k).sp)
+                        rotate(-18f) {
+                            drawOval(
+                                color = border,
+                                topLeft = Offset(center.x - r * 21.5f / 19f, center.y - r * 6f / 19f),
+                                size = Size(r * 43f / 19f, r * 12f / 19f),
+                                style = Stroke(width = (2f * k).coerceAtLeast(1f)),
+                            )
+                        }
                     }
-                    Spacer(Modifier.height((5f * k).dp))
+                    Spacer(Modifier.width((14f * k).dp))
+                    Text(
+                        cfg.title,
+                        color = Color(0xFFEEEEEE),
+                        fontSize = scaledSp(28f),
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (cfg.subtitle.isNotEmpty()) {
+                        Text(
+                            cfg.subtitle,
+                            color = argb(menu.colorAccent),
+                            fontSize = scaledSp(28f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
+
             Column(
-                Modifier.padding(
-                    start = (720f * menu.layoutMargin / 100f * k).dp,
-                    end = (720f * menu.layoutMargin / 100f * k).dp,
-                    top = (45f * k).dp,
+                Modifier.fillMaxWidth().padding(
+                    start = (margin * k).dp,
+                    end = (margin * k).dp,
+                    top = (menuTop * k).dp,
                 ),
                 verticalArrangement = Arrangement.spacedBy((menu.buttonSpacing * k).dp),
             ) {
-                entries.forEachIndexed { index, entry ->
+                visible.forEachIndexed { index, entry ->
                     val eff = EffectiveButtonStyle.resolve(entry, menu)
                     val selected = index == 0
                     val shape = RoundedCornerShape((eff.radius * k).dp)
-                    val bg = if (selected) argb(eff.colorBg).copy(alpha = menu.buttonAlpha / 255f)
-                    else argb(eff.colorBg).copy(alpha = 0.06f)
-                    val borderColor = if (selected) argb(eff.colorBorder) else argb(eff.colorBorder).copy(alpha = 0.35f)
-                    val width = (eff.width * k).coerceAtMost(720f * k - 2 * (720f * menu.layoutMargin / 100f * k))
-                    Row(
+                    val fill = argb(eff.colorBg)
+                    val fillAlpha = when (eff.style) {
+                        ButtonStyle.SOLID -> if (selected) 56 else 6
+                        ButtonStyle.OUTLINE -> if (selected) 28 else 0
+                        ButtonStyle.MINIMAL -> if (selected) 34 else 0
+                        ButtonStyle.GLASS -> if (selected) 110 else 60
+                        else -> 0
+                    } / 255f * menu.buttonAlpha / 255f
+                    val borderColor = argb(eff.colorBorder)
+                    val borderAlpha = if (selected) 220 else if (eff.style == ButtonStyle.OUTLINE) 110 else 80
+                    val borderWidth = if (eff.style == ButtonStyle.MINIMAL && !selected) 0f
+                    else (eff.border * k).coerceAtLeast(1f)
+                    val textColor = argb(if (selected) eff.colorTextSel else eff.colorText)
+                    val width = (eff.width * k).coerceAtMost((720f - 2f * margin) * k)
+                    val height = (eff.height * k).coerceAtLeast(30f * k)
+                    val contentAlignment = when (eff.textAlign) {
+                        MenuAlign.CENTER -> Alignment.Center
+                        MenuAlign.RIGHT -> Alignment.CenterEnd
+                        else -> Alignment.CenterStart
+                    }
+                    val blockAlignment = when (eff.textAlign) {
+                        MenuAlign.CENTER -> Alignment.CenterHorizontally
+                        MenuAlign.RIGHT -> Alignment.End
+                        else -> Alignment.Start
+                    }
+                    Box(
                         Modifier.width(width.dp)
-                            .height((eff.height * k).dp)
+                            .height(height.dp)
                             .clip(shape)
                             .background(
-                                if (selected && eff.style != ButtonStyle.OUTLINE)
-                                    Brush.horizontalGradient(listOf(bg, bg.copy(alpha = bg.alpha / 4f)))
-                                else Brush.horizontalGradient(listOf(bg, bg)),
-                            )
-                            .border((eff.border.coerceAtLeast(1) * k).dp, borderColor, shape)
-                            .padding(horizontal = (14f * k).dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        if (eff.showIcon) {
-                            Box(
-                                Modifier.size((eff.height * k * 0.3f).dp)
-                                    .clip(RoundedCornerShape(50))
-                                    .background(argb(if (selected) eff.colorTextSel else eff.colorText).copy(alpha = 0.5f)),
-                            )
-                            Spacer(Modifier.width((10f * k).dp))
-                        }
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                entry.name,
-                                color = argb(if (selected) eff.colorTextSel else eff.colorText),
-                                fontSize = (menu.textSize * k).sp,
-                                textAlign = when (eff.textAlign) {
-                                    MenuAlign.CENTER -> TextAlign.Center
-                                    MenuAlign.RIGHT -> TextAlign.End
-                                    else -> TextAlign.Start
+                                if (selected && eff.style != ButtonStyle.OUTLINE) {
+                                    Brush.horizontalGradient(
+                                        listOf(
+                                            fill.copy(alpha = fillAlpha),
+                                            fill.copy(alpha = fillAlpha / 4f),
+                                        ),
+                                    )
+                                } else {
+                                    Brush.horizontalGradient(
+                                        listOf(fill.copy(alpha = fillAlpha), fill.copy(alpha = fillAlpha)),
+                                    )
                                 },
                             )
-                            if (menu.showDescription && entry.description.isNotEmpty()) {
-                                Text(
-                                    entry.description,
-                                    color = argb(if (selected) eff.colorTextSel else eff.colorText).copy(alpha = 0.7f),
-                                    fontSize = (menu.textSize * 0.72f * k).sp,
-                                )
+                            .border(borderWidth.dp, borderColor.copy(alpha = borderAlpha / 255f), shape),
+                    ) {
+                        if (selected) {
+                            Box(
+                                Modifier.padding(start = 0.dp, top = (8f * k).dp)
+                                    .width((2f * k).coerceAtLeast(1f).dp)
+                                    .height((height - 16f * k).coerceAtLeast(1f).dp)
+                                    .background(argb(menu.colorAccent)),
+                            )
+                        }
+                        Box(
+                            Modifier.fillMaxSize().padding(horizontal = (18f * k).dp),
+                            contentAlignment = contentAlignment,
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (eff.showIcon) {
+                                    val iconR = (eff.height / 3f * eff.iconScale / 100f)
+                                        .coerceIn(5f, (eff.height / 2f - 4f).coerceAtLeast(5f))
+                                    MenuIcon(
+                                        kind = iconKind(entry),
+                                        color = textColor,
+                                        modifier = Modifier.size((iconR * 2.6f * k).dp),
+                                    )
+                                    Spacer(Modifier.width((10f * k).dp))
+                                }
+                                Column(horizontalAlignment = blockAlignment) {
+                                    Text(
+                                        entry.name,
+                                        color = textColor,
+                                        fontSize = scaledSp(menu.textSize.toFloat()),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    if (menu.showDescription && entry.description.isNotEmpty()) {
+                                        Text(
+                                            entry.description,
+                                            color = textColor.copy(alpha = 0.59f),
+                                            fontSize = scaledSp(menu.textSize * 0.72f),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/** Espelha icon_kind()/draw_icon(): glifos procedurais, sem arquivos. */
+private fun iconKind(entry: JbmEntry): Int {
+    val n = entry.icon.ifEmpty { entry.type.id }
+    return when {
+        n.contains("recovery") -> 1
+        n.contains("fastboot") -> 2
+        n.contains("download") -> 3
+        n.contains("reboot") || n.contains("restart") -> 4
+        n.contains("power") || n.contains("off") -> 5
+        n.contains("script") || n.contains("binary") -> 6
+        else -> 0
+    }
+}
+
+@Composable
+private fun MenuIcon(kind: Int, color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        // O glifo e desenhado com raio menor que a metade do canvas para o
+        // anel do planeta caber sem corte.
+        val r = size.minDimension * 0.38f
+        val c = Offset(size.width / 2f, size.height / 2f)
+        val stroke = (r / 5f).coerceAtLeast(1f)
+        fun ring(radius: Float, width: Float) = drawCircle(
+            color = color, radius = radius, center = c, style = Stroke(width),
+        )
+        when (kind) {
+            1 -> { // recovery: cruz dentro de um anel
+                ring(r, stroke)
+                drawLine(color, Offset(c.x - r / 2f, c.y), Offset(c.x + r / 2f, c.y), stroke)
+                drawLine(color, Offset(c.x, c.y - r / 2f), Offset(c.x, c.y + r / 2f), stroke)
+            }
+            2 -> { // fastboot: seta para a direita
+                drawRect(color, Offset(c.x - r, c.y - r / 6f), Size(r * 1.5f, r / 3f))
+                val path = Path().apply {
+                    moveTo(c.x + r / 2f, c.y - r / 2f)
+                    lineTo(c.x + r, c.y)
+                    lineTo(c.x + r / 2f, c.y + r / 2f)
+                    close()
+                }
+                drawPath(path, color)
+            }
+            3 -> { // download: seta para baixo sobre uma base
+                drawRect(color, Offset(c.x - r / 8f, c.y - r), Size(r / 4f, r * 1.1f))
+                val path = Path().apply {
+                    moveTo(c.x - r / 2f, c.y + r / 4f)
+                    lineTo(c.x + r / 2f, c.y + r / 4f)
+                    lineTo(c.x, c.y + r * 0.75f)
+                    close()
+                }
+                drawPath(path, color)
+                drawRect(color, Offset(c.x - r, c.y + r - stroke), Size(r * 2f, stroke))
+            }
+            4 -> { // reboot: seta circular
+                ring(r, stroke)
+                drawRect(color, Offset(c.x + r / 2f, c.y - r), Size(r / 2f, r / 2f))
+            }
+            5 -> { // power: anel + haste
+                ring(r, stroke)
+                drawLine(color, Offset(c.x, c.y - r - 1f), Offset(c.x, c.y), stroke)
+            }
+            6 -> { // script: janela de terminal
+                drawRoundRect(
+                    color = color,
+                    topLeft = Offset(c.x - r, c.y - r / 2f),
+                    size = Size(r * 2f, r),
+                    cornerRadius = CornerRadius(2f),
+                    style = Stroke(stroke),
+                )
+                drawRect(color, Offset(c.x - r / 2f, c.y), Size(r / 2f, r / 2f))
+            }
+            else -> { // system: planeta com anel
+                ring(r, stroke)
+                drawCircle(color, radius = (r / 3f).coerceAtLeast(1f), center = c)
+                rotate(-18f, c) {
+                    drawOval(
+                        color = color,
+                        topLeft = Offset(c.x - r * 4f / 3f, c.y - r / 4f),
+                        size = Size(r * 8f / 3f, r / 2f),
+                        style = Stroke(stroke),
+                    )
                 }
             }
         }

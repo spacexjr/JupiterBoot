@@ -39,8 +39,8 @@ data class ThemeIni(
     var textAlign: Int = 0,
     var layoutMargin: Int = 7,
     var showTitle: Boolean = true,
-    var showDescription: Boolean = true,
-    var showIcons: Boolean = true,
+    var showDescription: Boolean = false,
+    var showIcons: Boolean = false,
     var iconScale: Int = 100,
     /** Chaves realmente presentes no arquivo (usado pelo `extends`). */
     val explicitKeys: Set<String> = THEME_KEYS,

@@ -274,8 +274,8 @@ config_version = 2
 title = Jupiter
 subtitle = Boot
 show_title = 1
-show_description = 1
-show_icons = 1
+show_description = 0 ; default: only the mode name is shown
+show_icons = 0       ; default: no mode icons
 icon_scale = 100
 background = /cache/Jupiter/background.bmp   ; optional, BMP 24-bit only
 color_bg = #020202
@@ -316,7 +316,7 @@ the visual style of its row; omitted values inherit the theme:
 [system]
 name = System
 description = Start Android
-icon = system        ; system | recovery | fastboot | download | reboot | power | script
+# icon = system      ; optional; also set show_icons = 1 to draw it
 type = system        ; system | recovery | fastboot | download | reboot | poweroff | script | binary
 order = 0
 enabled = 1

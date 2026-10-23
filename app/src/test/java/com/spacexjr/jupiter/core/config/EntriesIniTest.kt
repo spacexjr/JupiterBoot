@@ -67,7 +67,8 @@ class EntriesIniParserTest {
         assertTrue(entries[0].isDefault)
         assertEquals(EntryType.POWEROFF, entries[5].type)
         assertEquals("Start Android", entries[0].description)
-        assertEquals("system", entries[0].icon)
+        // Padrao so com texto: nenhuma entrada embutida define icone.
+        assertTrue(entries.all { it.icon.isEmpty() })
     }
 
     @Test

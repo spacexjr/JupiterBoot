@@ -164,20 +164,23 @@ object EntriesIniParser {
 
     private val KNOWN_KEYS = JbmEntry().knownKeys
 
-    /** Entradas embutidas do firmware (usadas quando o arquivo nao existe). */
+    /**
+     * Entradas embutidas do firmware (usadas quando o arquivo nao existe).
+     * Sem `icon`: o menu padrao mostra apenas o texto de cada modo.
+     */
     fun builtinEntries(): List<JbmEntry> = listOf(
         JbmEntry("system", "System", EntryType.SYSTEM, order = 0, isDefault = true,
-            description = "Start Android", icon = "system"),
+            description = "Start Android"),
         JbmEntry("recovery", "Recovery", EntryType.RECOVERY, order = 1,
-            description = "Reboot to recovery", icon = "recovery"),
+            description = "Reboot to recovery"),
         JbmEntry("fastboot", "Fastboot", EntryType.FASTBOOT, order = 2,
-            description = "Reboot to bootloader", icon = "fastboot"),
+            description = "Reboot to bootloader"),
         JbmEntry("download", "Download", EntryType.DOWNLOAD, order = 3,
-            description = "Reboot to download mode", icon = "download"),
+            description = "Reboot to download mode"),
         JbmEntry("reboot", "Reboot", EntryType.REBOOT, order = 4,
-            description = "Restart the device", icon = "reboot"),
+            description = "Restart the device"),
         JbmEntry("poweroff", "Power off", EntryType.POWEROFF, order = 5,
-            description = "Power the device off", icon = "power"),
+            description = "Power the device off"),
     )
 
     fun builtinTemplate(): String = buildString {
@@ -189,7 +192,6 @@ object EntriesIniParser {
             append("[${e.id}]\n")
             append("name = ${e.name}\n")
             append("description = ${e.description}\n")
-            append("icon = ${e.icon}\n")
             append("type = ${e.type.id}\n")
             append("enabled = 1\n")
             append("order = $i\n")

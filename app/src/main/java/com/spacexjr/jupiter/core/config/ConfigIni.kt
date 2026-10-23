@@ -35,8 +35,8 @@ data class ConfigIni(
     var textAlign: Int = 0,
     var textSize: Int = 19,
     var showTitle: Boolean = true,
-    var showDescription: Boolean = true,
-    var showIcons: Boolean = true,
+    var showDescription: Boolean = false,
+    var showIcons: Boolean = false,
     var iconScale: Int = 100,
     var menuTimeoutSec: Int = 15,
     var defaultEntry: Int = -1,
@@ -94,8 +94,8 @@ data class ConfigIni(
             append("title = Jupiter\n")
             append("subtitle = Boot\n")
             append("show_title = 1\n")
-            append("show_description = 1\n")
-            append("show_icons = 1\n")
+            append("show_description = 0\n")
+            append("show_icons = 0\n")
             append("icon_scale = 100\n")
             append("# background = /cache/Jupiter/background.bmp\n")
             append("# Colours/metrics live in themes/default.ini. Uncomment a line\n")

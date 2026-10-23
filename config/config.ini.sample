@@ -12,8 +12,8 @@ config_version = 2
 title = Jupiter
 subtitle = Boot
 show_title = 1
-show_description = 1
-show_icons = 1
+show_description = 0      ; 0 = só o nome do modo (padrão); 1 = mostrar descrições
+show_icons = 0            ; 0 = modos só com texto (padrão); 1 = mostrar ícones
 icon_scale = 100
 
 # background = /cache/Jupiter/background.bmp   ; BMP 24-bit

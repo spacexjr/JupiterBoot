@@ -18,8 +18,8 @@
       "asset": "bin/arm64-v8a/jbm_init",
       "file": "jbm_init",
       "version": "1.1",
-      "size": 909648,
-      "sha256": "4689eb59d94689656fafbf58a7bfcf74c005f362a052f82e7215c85762972ac6",
+      "size": 909632,
+      "sha256": "810ec0154cf39f46c6064530befbe5c42a8699da6b7166d2b2a45478f2206915",
       "executable": true,
       "license": "JupiterBoot — compilado a partir de src/jbm_menu.c + src/start.S (clang aarch64 freestanding)"
     }
